@@ -1,0 +1,5 @@
+setup.txt
+outputs/
+.claude/
+__pycache__/
+*.safetensors

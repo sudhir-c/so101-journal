@@ -1,21 +1,11 @@
-# 3 - First policy
+# 3 - First Policy
 
-I scrunched up a small teabag and tore the lid off one of the motor boxes to get my setup for making my first policy. 
-I figured I would start with a basic pick and place task, and I only stuck to 10 trials as I just wanted to verify that I could sucessfully train a policy.
-I trained an ACT policy with 20k steps.
+I scrunched up a small teabag and tore the lid off one of the motor boxes to get my setup for a basic pick and place task. I just wanted to verify I could successfully train a policy end to end, so I kept things simple.
+
+I collected 10 demonstrations of ~15 seconds each at 60Hz, then trained an [ACT](https://tonyzhaozh.github.io/aloha/) policy for 20k steps. ACT (Action Chunking with Transformers) predicts a chunk of future actions at once rather than one step at a time, which helps reduce compounding errors during rollout. Training ran on MPS (Apple Silicon) and took overnight.
 
 https://github.com/user-attachments/assets/c4009bb8-28c6-4403-86e9-27d74351b068
 
-Although it picked up the object, the arm motion is very jerky and it missed the box. 
-I think the former is due to the fact that I only did 10 trials. 
-As for the latter, I think I may have nudged the box between training and evaluation which would obviously cause problems, given that my policy is not (yet) robust enough to handle objects moving around. 
-I also noticed after training was done that I accidentally moved the leader arm into the camera frame during training. The end effector and object were still visible, but I changed my setup to eliminate that potential source of error in my data.
+The arm picked up the object but the motion was jerky and it missed the box. I think the jerkiness comes down to the small dataset — 10 demos isn't much to learn a smooth trajectory from. The missed drop is likely because I nudged the box between training and evaluation; since the policy has no robustness to object position yet, even a small shift throws it off.
 
-
-
-
-
-
-
-
-
+I also noticed after training that I'd accidentally moved the leader arm into the camera frame during some demonstrations. The end effector and object were still visible, but it introduces a spurious visual feature the policy might latch onto. I updated my setup to keep the leader out of frame before collecting any more data.

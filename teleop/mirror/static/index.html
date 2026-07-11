@@ -1,0 +1,247 @@
+<title>SO-101 Mirror · spectre</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 1.2rem auto; max-width: 1100px; padding: 0 1rem; line-height: 1.4; }
+  h1 { font-size: 1.2rem; margin: 0 0 .3rem; }
+  .banner { background: #f39c12; color: #111; font-weight: 700; padding: .5rem .8rem; border-radius: 6px; margin-bottom: .8rem; }
+  .cols { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .col { flex: 1 1 380px; min-width: 320px; }
+  img#feed { width: 100%; border-radius: 8px; background: #0003; }
+  .card { border: 1px solid #8884; border-radius: 8px; padding: .7rem .9rem; margin-bottom: .8rem; }
+  .card h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; opacity: .7; margin: 0 0 .5rem; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: .9rem; }
+  th, td { text-align: right; padding: .18rem .4rem; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { opacity: .6; font-weight: 600; }
+  td.held { opacity: .5; }
+  .dot { display: inline-block; width: .7em; height: .7em; border-radius: 50%; vertical-align: middle; margin-right: .4em; }
+  .g { background: #2ecc71; } .a { background: #f39c12; } .r { background: #e74c3c; }
+  svg { width: 100%; height: 260px; background: #8881; border-radius: 8px; }
+  .legend { font-size: .8rem; opacity: .8; margin-top: .3rem; }
+  .swatch { display: inline-block; width: .8em; height: .28em; vertical-align: middle; margin: 0 .2em 0 .6em; border-radius: 2px; }
+  .toolbar { display: flex; gap: .6rem; margin-top: .4rem; }
+  button { flex: 1; padding: .9rem; font-size: 1rem; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; }
+  #stop { background: #e74c3c; color: #fff; }
+  #enable { background: #7f8c8d; color: #fff; }
+  #enable:disabled { opacity: .55; cursor: not-allowed; }
+  .status { font-size: .82rem; opacity: .85; margin-top: .5rem; }
+</style>
+
+<h1>SO-101 Mirror — <span id="mode">preview</span></h1>
+<div class="banner" id="banner">PREVIEW — the robot will NOT move. (Live motion arrives in Phase 3.)</div>
+<div id="err" style="color:#e74c3c; font-weight:600; margin-bottom:.6rem"></div>
+
+<div class="cols">
+  <div class="col">
+    <div class="card">
+      <h2>Camera</h2>
+      <div style="display:flex; gap:.5rem; align-items:center">
+        <select id="cam" style="flex:1; padding:.4rem"></select>
+        <button id="cam-rescan" style="flex:0 0 auto; padding:.4rem .7rem; font-size:.85rem; background:#34495e; color:#fff">rescan</button>
+      </div>
+      <div class="legend" id="cam-names">detecting devices…</div>
+    </div>
+    <img id="feed" src="/video" alt="webcam feed">
+    <div class="card" style="margin-top:.8rem">
+      <h2>Tracking quality</h2>
+      <div><span class="dot" id="q-dot"></span><b id="q-text">…</b></div>
+      <div class="status" id="q-detail"></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <h2>Angles</h2>
+      <table>
+        <thead><tr><th>joint</th><th>human</th><th>target</th><th>actual</th></tr></thead>
+        <tbody id="angles"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Target pose preview (schematic)</h2>
+      <svg id="preview" viewBox="0 0 300 260" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="legend">
+        <span class="swatch" style="background:#3498db"></span>target (mapped)
+        <span class="swatch" style="background:#95a5a6"></span>actual (read-back)
+      </div>
+      <div class="legend" id="showing"></div>
+    </div>
+
+    <div class="card">
+      <h2>Controls</h2>
+      <div class="toolbar">
+        <button id="enable" disabled title="Live motion is added in Phase 3">ENABLE (Phase 3)</button>
+        <button id="stop">STOP · go limp</button>
+      </div>
+      <div class="status" id="ctl-status"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"];
+let controlled = ["shoulder_lift", "elbow_flex", "wrist_flex", "gripper"];
+
+const el = (id) => document.getElementById(id);
+
+// Build the angle table rows once.
+function buildTable() {
+  const tb = el("angles");
+  tb.innerHTML = "";
+  for (const j of JOINTS) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${j}</td><td id="h-${j}">–</td><td id="t-${j}">–</td><td id="a-${j}">–</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+const fmt = (v) => (v === null || v === undefined ? "–" : v.toFixed(1));
+
+function updateTable(s) {
+  for (const j of JOINTS) {
+    const isCtrl = s.controlled.includes(j);
+    // human only exists for controlled arm joints
+    const hv = s.human[j === "gripper" ? "gripper" : j];
+    el("h-" + j).textContent = isCtrl ? (j === "gripper" ? (hv == null ? "–" : hv.toFixed(2)) : fmt(hv)) : "";
+    el("t-" + j).textContent = fmt(s.target[j]);
+    el("a-" + j).textContent = fmt(s.actual[j]);
+    el("t-" + j).className = isCtrl ? "" : "held";
+  }
+}
+
+function updateQuality(s) {
+  const q = s.quality;
+  let cls = "r", txt = "NO TRACKING";
+  if (q.arm_visible && q.hand_visible) { cls = "g"; txt = "TRACKING OK"; }
+  else if (q.arm_visible || q.hand_visible) { cls = "a"; txt = "PARTIAL"; }
+  el("q-dot").className = "dot " + cls;
+  el("q-text").textContent = txt + (s.tracking_ok ? "" : " · holding");
+  el("q-detail").textContent =
+    `arm ${q.arm_confidence} (${q.arm_visible ? "ok" : "low"}) · hand ${q.hand_confidence} (${q.hand_visible ? "ok" : "low"}) · ${s.fps} fps`;
+}
+
+// ── 2D schematic linkage ────────────────────────────────────────────────────
+// Angles are the ROBOT target/actual joint angles (deg). 0 = straight/in-line
+// for elbow & wrist; shoulder_lift tilts the upper arm. Fixed link lengths.
+const BASE = { x: 150, y: 60 };
+const L1 = 70, L2 = 58, L3 = 34;
+
+function seg(x, y, deg, len) {
+  const r = (deg * Math.PI) / 180;
+  return { x: x + len * Math.cos(r), y: y + len * Math.sin(r), deg };
+}
+
+// Which joints to draw in the schematic. We bring these online one at a time;
+// hidden joints are held straight (angle 0) so only the visible link(s) move.
+const PREVIEW_JOINTS = ["shoulder_lift", "elbow_flex", "wrist_flex", "gripper"];
+
+function skeleton(angles, color, width) {
+  // angles: {shoulder_lift, elbow_flex, wrist_flex, gripper} (robot target/actual)
+  const vis = (j) => PREVIEW_JOINTS.includes(j);
+  const sl = angles.shoulder_lift;
+  if (vis("shoulder_lift") && sl == null) return "";
+  // Hidden joints contribute 0 (straight) so only visible links articulate.
+  const ef = vis("elbow_flex") ? angles.elbow_flex : 0;
+  const wf = vis("wrist_flex") ? angles.wrist_flex : 0;
+  if ((vis("elbow_flex") && ef == null) || (vis("wrist_flex") && wf == null)) return "";
+
+  const d1 = 90 + (sl ?? 0);   // shoulder_lift tilts upper arm from straight-down
+  const p1 = seg(BASE.x, BASE.y, d1, L1);
+  const d2 = d1 + ef;          // elbow bend
+  const p2 = seg(p1.x, p1.y, d2, L2);
+  const d3 = d2 + wf;          // wrist bend
+  const p3 = seg(p2.x, p2.y, d3, L3);
+
+  const line = (a, b) => `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${color}" stroke-width="${width}" stroke-linecap="round"/>`;
+  const dot = (p, r) => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${color}"/>`;
+
+  const parts = [];
+  if (vis("shoulder_lift")) { parts.push(line(BASE, p1), dot(BASE, 4), dot(p1, 3)); }
+  if (vis("elbow_flex"))    { parts.push(line(p1, p2), dot(p2, 3)); }
+  if (vis("wrist_flex"))    { parts.push(line(p2, p3)); }
+  if (vis("gripper")) {
+    const g = Math.max(0, Math.min(1, (angles.gripper ?? 0) / 100));
+    const half = 6 + g * 26;   // degrees of half-opening
+    parts.push(line(p3, seg(p3.x, p3.y, d3 - half, 16)),
+               line(p3, seg(p3.x, p3.y, d3 + half, 16)));
+  }
+  return parts.join("");
+}
+
+function updatePreview(s) {
+  const target = {
+    shoulder_lift: s.target.shoulder_lift, elbow_flex: s.target.elbow_flex,
+    wrist_flex: s.target.wrist_flex, gripper: s.target.gripper,
+  };
+  const actual = {
+    shoulder_lift: s.actual.shoulder_lift, elbow_flex: s.actual.elbow_flex,
+    wrist_flex: s.actual.wrist_flex, gripper: s.actual.gripper,
+  };
+  el("preview").innerHTML =
+    skeleton(actual, "#95a5a6", 5) + skeleton(target, "#3498db", 4);
+}
+
+function render(s) {
+  controlled = s.controlled || controlled;
+  el("mode").textContent = s.mode;
+  el("showing").textContent = "showing joint(s): " + PREVIEW_JOINTS.join(", ") + " (others hidden)";
+  el("err").textContent = s.error ? ("⚠ " + s.error) : "";
+  updateTable(s);
+  updateQuality(s);
+  updatePreview(s);
+  const stoppedTxt = s.stopped ? "STOPPED" : "running";
+  const torqueTxt = s.torque ? "torque ON" : "LIMP (torque off)";
+  el("ctl-status").textContent =
+    `${s.connected ? "robot connected" : "robot DISCONNECTED"} · ${torqueTxt} · ${stoppedTxt}`;
+  el("stop").textContent = s.torque ? "STOP · go limp" : "RESUME · re-hold";
+}
+
+async function poll() {
+  try {
+    const s = await (await fetch("/api/state")).json();
+    render(s);
+  } catch (e) { /* transient */ }
+  setTimeout(poll, 66);   // ~15 Hz
+}
+
+el("stop").addEventListener("click", async () => {
+  // Toggle: if torque is on → STOP (limp); if off → RESUME (re-hold).
+  const s = await (await fetch("/api/state")).json();
+  await fetch(s.torque ? "/api/stop" : "/api/resume", { method: "POST" });
+});
+
+// ── Camera selection ────────────────────────────────────────────────────────
+let camReady = false;
+async function loadCameras() {
+  try {
+    const c = await (await fetch("/api/cameras")).json();
+    const sel = el("cam");
+    sel.innerHTML = "";
+    for (const i of c.indices) {
+      const o = document.createElement("option");
+      o.value = i; o.textContent = "Camera index " + i;
+      if (i === c.current) o.selected = true;
+      sel.appendChild(o);
+    }
+    el("cam-names").textContent = c.names && c.names.length
+      ? "detected devices (any order): " + c.names.join(", ") + " — pick the index that shows you"
+      : "pick the index whose feed shows your face";
+    camReady = true;
+  } catch (e) { el("cam-names").textContent = "could not list cameras"; }
+}
+el("cam").addEventListener("change", async () => {
+  const index = parseInt(el("cam").value, 10);
+  el("cam-names").textContent = "switching to index " + index + "…";
+  await fetch("/api/camera", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ index }),
+  });
+  setTimeout(loadCameras, 800);
+});
+el("cam-rescan").addEventListener("click", loadCameras);
+
+buildTable();
+loadCameras();
+poll();
+</script>

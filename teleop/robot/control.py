@@ -84,6 +84,7 @@ class RobotController:
         self._robot: Optional[SOFollower] = None
         self._lock = threading.Lock()
         self._stopped = False
+        self._torque_enabled = True  # tracked so callers can query limp/held state
         self._last_step_t: Optional[float] = None  # monotonic time of last step()
 
     # ------------------------------------------------------------------
@@ -201,6 +202,38 @@ class RobotController:
     @property
     def is_stopped(self) -> bool:
         return self._stopped
+
+    # ------------------------------------------------------------------
+    # Torque control (added for the mirror app's STOP = go-limp).
+    # These are NEW, additive methods — stop()/resume()/step() are unchanged,
+    # so the standalone slider UI keeps its freeze-in-place STOP behavior.
+    # ------------------------------------------------------------------
+
+    def disable_torque(self) -> None:
+        """Release the motors so the arm can be moved by hand (goes limp),
+        while staying connected. Used by the mirror app's STOP."""
+        with self._lock:
+            self._require_connected()
+            self._robot.bus.disable_torque()
+            self._torque_enabled = False
+        logger.warning("Torque DISABLED — arm is limp")
+
+    def enable_torque(self) -> None:
+        """Re-enable holding torque. Stages goal = present position first (while
+        torque is still off) so the arm holds where it currently is instead of
+        snapping to a stale goal when torque comes back on."""
+        with self._lock:
+            self._require_connected()
+            present = self._read_positions_unlocked()
+            self._robot.send_action({f"{j}.pos": v for j, v in present.items()})
+            self._robot.bus.enable_torque()
+            self._torque_enabled = True
+            self._last_step_t = None  # reset the velocity-limit clock
+        logger.info("Torque ENABLED — holding current pose")
+
+    @property
+    def is_torque_enabled(self) -> bool:
+        return self._torque_enabled
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -26,7 +26,7 @@ cd /Users/sudhirc/Desktop/Projects/so-101-arm
 .venv/bin/python server.py --camera 1 --side right
 ```
 
-Then open **<http://127.0.0.1:8000>**.
+Then open **<http://127.0.0.1:8080>**.
 
 ---
 

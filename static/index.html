@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arm Pose Viz</title>
+  <style>
+    :root {
+      --bg: #14161a;
+      --panel: #1d2026;
+      --line: #2c3038;
+      --text: #e8eaed;
+      --dim: #8b9198;
+      --good: #4ade80;
+      --warn: #fbbf24;
+      --bad: #f87171;
+      --accent: #67c8ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px;
+      background: var(--bg); color: var(--text);
+      font: 15px/1.5 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; }
+    header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+    h1 { font-size: 19px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+    .meta { color: var(--dim); font-size: 13px; }
+    .meta b { color: var(--text); font-weight: 600; }
+
+    .grid { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 20px; align-items: start; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+    .video {
+      background: #000; border: 1px solid var(--line); border-radius: 12px;
+      overflow: hidden; line-height: 0;
+    }
+    .video img { width: 100%; height: auto; display: block; }
+
+    .card {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 12px; padding: 16px;
+    }
+    .card + .card { margin-top: 14px; }
+    .card h2 {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.09em;
+      text-transform: uppercase; color: var(--dim); margin: 0 0 12px;
+    }
+
+    /* tracking quality */
+    .quality { display: flex; align-items: center; gap: 10px; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--bad); flex: 0 0 auto; }
+    .dot.good { background: var(--good); box-shadow: 0 0 0 4px rgb(74 222 128 / 0.16); }
+    .dot.warn { background: var(--warn); box-shadow: 0 0 0 4px rgb(251 191 36 / 0.16); }
+    .dot.bad  { background: var(--bad);  box-shadow: 0 0 0 4px rgb(248 113 113 / 0.16); }
+    #qtext { font-weight: 600; font-size: 14px; }
+    #qtext.good { color: var(--good); } #qtext.warn { color: var(--warn); } #qtext.bad { color: var(--bad); }
+    .conf { margin-top: 10px; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
+            font-size: 12.5px; color: var(--dim); }
+    .conf .v { font-variant-numeric: tabular-nums; color: var(--text); }
+
+    /* values */
+    .val { display: flex; justify-content: space-between; align-items: baseline;
+           padding: 9px 0; border-bottom: 1px solid var(--line); }
+    .val:last-child { border-bottom: 0; }
+    .val .k { font-size: 13px; color: var(--dim); }
+    .val .n {
+      font: 600 19px/1 ui-monospace, "SF Mono", Menlo, monospace;
+      font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+    }
+    .val .n.stale { color: var(--bad); opacity: 0.65; }
+
+    /* gripper bar */
+    .bar { height: 7px; background: #0f1114; border-radius: 4px; overflow: hidden; margin-top: 10px; }
+    .bar > i { display: block; height: 100%; width: 0%; background: var(--accent);
+               transition: width 90ms linear; }
+    .hint { margin-top: 10px; font-size: 12px; color: var(--dim); }
+    code { background: #0f1114; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+    .err { color: var(--bad); font-size: 13px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Arm Pose Viz</h1>
+    <span class="meta">
+      tracking <b id="m-side">--</b> arm &middot; phase <b id="m-phase">--</b> &middot; <b id="m-fps">--</b> fps
+    </span>
+  </header>
+
+  <div class="grid">
+    <div class="video"><img id="stream" src="/stream" alt="annotated webcam stream" /></div>
+
+    <div>
+      <div class="card">
+        <h2>Tracking quality</h2>
+        <div class="quality"><span class="dot bad" id="qdot"></span><span id="qtext" class="bad">connecting…</span></div>
+        <div class="conf">
+          <span>arm confidence</span><span class="v" id="c-arm">--</span>
+          <span>hand confidence</span><span class="v" id="c-hand">--</span>
+        </div>
+        <div id="err" class="err"></div>
+      </div>
+
+      <div class="card">
+        <h2>Joint values</h2>
+        <div class="val"><span class="k">shoulder_lift</span><span class="n" id="v-shoulder">--</span></div>
+        <div class="val"><span class="k">elbow_flex</span><span class="n" id="v-elbow">--</span></div>
+        <div class="val"><span class="k">wrist_flex</span><span class="n" id="v-wrist">--</span></div>
+        <div class="val"><span class="k">gripper</span><span class="n" id="v-gripper">--</span></div>
+        <div class="bar"><i id="gripbar"></i></div>
+        <div class="hint">raw pinch ratio <code id="v-raw">--</code></div>
+      </div>
+
+      <div class="card">
+        <h2>Sanity targets</h2>
+        <div class="hint" style="margin-top:0">
+          shoulder_lift &mdash; hanging <code>0&deg;</code>, horizontal <code>90&deg;</code>, up <code>180&deg;</code><br />
+          elbow_flex &mdash; straight <code>180&deg;</code>, right angle <code>90&deg;</code><br />
+          wrist_flex &mdash; in line <code>180&deg;</code>, bent <code>90&deg;</code><br />
+          gripper &mdash; pinched <code>0.00</code>, wide <code>1.00</code>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const deg = (v) => (v === null || v === undefined) ? "--" : v.toFixed(1) + "°";
+
+  function setVal(el, txt, present) {
+    el.textContent = txt;
+    el.classList.toggle("stale", !present);
+  }
+
+  async function poll() {
+    try {
+      const s = await (await fetch("/api/state", { cache: "no-store" })).json();
+
+      $("m-side").textContent  = s.side ?? "--";
+      $("m-phase").textContent = s.phase ?? "--";
+      $("m-fps").textContent   = (s.fps ?? 0).toFixed(1);
+      $("err").textContent     = s.error ? s.error.split("\n")[0] : "";
+
+      // tracking quality: green only when everything this phase needs is confident
+      const needHand = (s.phase ?? 4) >= 4;
+      const good = s.arm_visible && (!needHand || s.hand_visible);
+      const partial = s.arm_visible || (needHand && s.hand_visible);
+      const cls = good ? "good" : (partial ? "warn" : "bad");
+      const label = good ? "Tracking OK"
+                  : partial ? (s.arm_visible ? "Hand not detected" : "Arm not detected")
+                  : "No tracking";
+      $("qdot").className  = "dot " + cls;
+      $("qtext").className = cls;
+      $("qtext").textContent = label;
+
+      $("c-arm").textContent  = (s.arm_confidence ?? 0).toFixed(2);
+      $("c-hand").textContent = (s.hand_confidence ?? 0).toFixed(2);
+
+      setVal($("v-shoulder"), deg(s.shoulder_lift), s.shoulder_lift !== null);
+      setVal($("v-elbow"),    deg(s.elbow_flex),    s.elbow_flex !== null);
+      setVal($("v-wrist"),    deg(s.wrist_flex),    s.wrist_flex !== null);
+      setVal($("v-gripper"),
+             s.gripper === null ? "--" : s.gripper.toFixed(2),
+             s.gripper !== null);
+
+      $("gripbar").style.width = ((s.gripper ?? 0) * 100).toFixed(0) + "%";
+      $("v-raw").textContent = s.gripper_raw_ratio === null ? "--"
+                             : s.gripper_raw_ratio.toFixed(3);
+    } catch (e) {
+      $("qtext").textContent = "server unreachable";
+      $("qtext").className = "bad";
+      $("qdot").className = "dot bad";
+    }
+  }
+
+  setInterval(poll, 100);  // 10 Hz is plenty for text readouts
+  poll();
+</script>
+</body>
+</html>

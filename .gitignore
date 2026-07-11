@@ -3,3 +3,7 @@ outputs/
 .claude/
 __pycache__/
 *.safetensors
+
+# MediaPipe Tasks model bundles: 22MB of binaries, reproducible via
+# scripts/download_models.sh. Fetch them, don't commit them.
+models/*.task

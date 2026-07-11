@@ -6,7 +6,7 @@ annotated video to your browser with the values overlaid.
 
 **No robot, no serial ports, no LeRobot, no hardware.** Pure CV + visualization.
 
-The reusable half is `arm_pose/pose_math.py` -- `compute_arm_state()` depends on
+The reusable half is `pose_math.py` -- `compute_arm_state()` depends on
 nothing but `numpy`, so a later project can import it as-is.
 
 ---
@@ -20,10 +20,10 @@ explicitly -- a bare `pip`/`python` on this machine points somewhere else.
 cd /Users/sudhirc/Desktop/Projects/so-101-arm
 
 # 1. Which camera is actually pointed at you?  (see "Camera" below -- this matters)
-.venv/bin/python server.py --snapshot
+.venv/bin/python -m teleop.vision.server --snapshot
 
 # 2. Run it
-.venv/bin/python server.py --camera 1 --side right
+.venv/bin/python -m teleop.vision.server --camera 1 --side right
 ```
 
 Then open **<http://127.0.0.1:8080>**.
@@ -48,8 +48,8 @@ Because of that, the tool never claims to know which name goes with which index.
 It gives you two ways to find out for real:
 
 ```bash
-.venv/bin/python server.py --list-cameras   # which indices deliver a live image
-.venv/bin/python server.py --snapshot       # dumps /tmp/camera_N.jpg -- just LOOK
+.venv/bin/python -m teleop.vision.server --list-cameras   # which indices deliver a live image
+.venv/bin/python -m teleop.vision.server --snapshot       # dumps /tmp/camera_N.jpg -- just LOOK
 ```
 
 At the time of writing, **`--camera 1` is the built-in MacBook camera pointed at
@@ -58,15 +58,15 @@ you**, and that is the default. If you ever get a black or wrong stream, re-run
 delivering black frames.
 
 The camera index is defined as `DEFAULT_CAMERA_INDEX` in
-[`arm_pose/camera.py`](arm_pose/camera.py) and overridable with `--camera`.
+[`camera.py`](camera.py) and overridable with `--camera`.
 
 ---
 
 ## Which arm
 
 ```bash
-.venv/bin/python server.py --side right    # default
-.venv/bin/python server.py --side left
+.venv/bin/python -m teleop.vision.server --side right    # default
+.venv/bin/python -m teleop.vision.server --side left
 ```
 
 `--side` is **your anatomical arm**, which is what you actually care about.
@@ -124,7 +124,7 @@ does not change the reading. That ratio is then mapped onto 0–1 by two
 thresholds:
 
 ```python
-# arm_pose/pose_math.py
+# teleop/vision/pose_math.py
 class GripperConfig:
     closed_ratio: float = 0.15   # at/below this -> 0.0  (pinched shut)
     open_ratio:   float = 1.10   # at/above this -> 1.0  (wide open)
@@ -134,7 +134,7 @@ They're mirrored as constants at the top of [`server.py`](server.py)
 (`GRIPPER_CLOSED_RATIO` / `GRIPPER_OPEN_RATIO`) and overridable per-run:
 
 ```bash
-.venv/bin/python server.py --gripper-closed 0.20 --gripper-open 0.95
+.venv/bin/python -m teleop.vision.server --gripper-closed 0.20 --gripper-open 0.95
 ```
 
 **How to tune:** the web UI shows the live **raw pinch ratio** under the gripper
@@ -148,10 +148,10 @@ and index wide and note it -> that's your `open_ratio`.
 The `--phase` flag lets you validate each layer on its own:
 
 ```bash
-.venv/bin/python server.py --phase 1    # raw webcam only        -> confirm the camera
-.venv/bin/python server.py --phase 2    # + arm skeleton         -> confirm arm tracking
-.venv/bin/python server.py --phase 3    # + shoulder_lift, elbow_flex
-.venv/bin/python server.py --phase 4    # + hand, wrist_flex, gripper   (default)
+.venv/bin/python -m teleop.vision.server --phase 1    # raw webcam only        -> confirm the camera
+.venv/bin/python -m teleop.vision.server --phase 2    # + arm skeleton         -> confirm arm tracking
+.venv/bin/python -m teleop.vision.server --phase 3    # + shoulder_lift, elbow_flex
+.venv/bin/python -m teleop.vision.server --phase 4    # + hand, wrist_flex, gripper   (default)
 ```
 
 ---
@@ -184,7 +184,7 @@ can always tell "not tracked" from a real zero.
 OpenCV, no MediaPipe, no FastAPI:
 
 ```python
-from arm_pose import compute_arm_state
+from teleop.vision import compute_arm_state
 
 state = compute_arm_state(
     pose_landmarks,          # 33 MediaPipe pose landmarks (or None)
@@ -212,11 +212,11 @@ scales and any angle read straight off normalized coordinates is skewed (a true
 45° reads as ~28°). Passing `image_size` undoes that. Pass `(1, 1)` only if your
 landmarks are already in pixels. There's a regression test pinning this.
 
-Smoothing is kept separate (and stateful) in `arm_pose/smoothing.py`, so the math
+Smoothing is kept separate (and stateful) in `smoothing.py`, so the math
 stays pure:
 
 ```python
-from arm_pose import ArmStateSmoother
+from teleop.vision import ArmStateSmoother
 smoother = ArmStateSmoother()
 state = smoother(state, timestamp_seconds)
 ```
@@ -232,22 +232,25 @@ turns it off if you want to see the raw jitter.
 
 ## Layout
 
+This half lives under `teleop/vision/` (models, scripts and tests are shared at
+the `teleop/` level):
+
 ```
-arm_pose/
+teleop/vision/
   pose_math.py    <- THE reusable module. numpy only. compute_arm_state().
   smoothing.py    <- One-Euro filter (stateful, kept out of the math)
   tracker.py      <- MediaPipe Tasks wrapper; mirroring + hand<->arm matching
   camera.py       <- capture, camera discovery, blank-feed detection
   overlay.py      <- OpenCV drawing (skeleton, values, quality light)
-server.py         <- FastAPI: MJPEG stream + /api/state
-static/index.html <- the page you watch
-models/           <- MediaPipe .task bundles (downloaded, not in the wheel)
-tests/            <- the sanity targets above, as executable tests
+  server.py       <- FastAPI: MJPEG stream + /api/state
+  static/index.html <- the page you watch
+teleop/models/    <- MediaPipe .task bundles (downloaded, not in the wheel)
+teleop/tests/     <- the sanity targets above, as executable tests
 ```
 
-`arm_pose/__init__.py` intentionally does **not** import `tracker.py`, so
-`from arm_pose import compute_arm_state` never drags MediaPipe or OpenCV into a
-consuming project.
+`teleop/vision/__init__.py` intentionally does **not** import `tracker.py`, so
+`from teleop.vision import compute_arm_state` never drags MediaPipe or OpenCV
+into a consuming project.
 
 ### Endpoints
 
@@ -277,7 +280,7 @@ Consequences:
   must be downloaded:
 
 ```bash
-./scripts/download_models.sh
+./teleop/scripts/download_models.sh
 ```
 
 The hand is matched to the arm by **proximity** -- we take whichever detected hand

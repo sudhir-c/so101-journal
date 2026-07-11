@@ -1,0 +1,164 @@
+<title>SO-101 · spectre</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, system-ui, sans-serif;
+    max-width: 640px; margin: 2rem auto; padding: 0 1rem;
+    line-height: 1.4;
+  }
+  h1 { font-size: 1.2rem; }
+  .status { font-size: .85rem; opacity: .8; margin-bottom: 1rem; }
+  .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%; vertical-align: middle; }
+  .dot.ok { background: #2ecc71; } .dot.bad { background: #e74c3c; }
+  .joint { border: 1px solid #8884; border-radius: 8px; padding: .8rem 1rem; margin: .5rem 0; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; }
+  .name { font-weight: 600; }
+  .vals { font-variant-numeric: tabular-nums; font-size: .9rem; opacity: .9; }
+  .vals b { font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; margin-top: .4rem; }
+  input[type=range]:disabled { opacity: .4; }
+  .toolbar { display: flex; gap: .5rem; margin-top: 1rem; }
+  button {
+    flex: 1; padding: 1rem; font-size: 1.05rem; font-weight: 700;
+    border: none; border-radius: 8px; cursor: pointer;
+  }
+  button#stop { background: #e74c3c; color: #fff; }
+  button#stop.stopped { background: #f39c12; }
+  button#sync { background: #34495e; color: #fff; flex: 0 0 auto; font-weight: 600; }
+</style>
+
+<h1>SO-101 · spectre — manual joint control</h1>
+<div class="status">
+  <span class="dot bad" id="conn-dot"></span>
+  <span id="conn-text">connecting…</span>
+</div>
+
+<div id="joints"></div>
+
+<div class="toolbar">
+  <button id="stop">STOP</button>
+  <button id="sync" title="Snap all sliders to the arm's current pose">Re-sync</button>
+</div>
+
+<script>
+const GRIPPER = "gripper";
+
+let limits = {};
+let targets = {};            // desired angle per joint
+let dragging = new Set();    // joints the user is currently holding
+let stopped = false;
+let ws = null;
+let resyncPending = false;   // snap targets to actual on next frame (after resume / re-sync)
+
+const el = (id) => document.getElementById(id);
+const unitFor = (name) => (name === GRIPPER ? "%" : "°");
+
+async function init() {
+  limits = await (await fetch("/limits")).json();
+  const pos = await (await fetch("/positions")).json();
+  buildUI(pos);
+  // Safety: initialize every target to the arm's CURRENT position so the
+  // stream holds still until a slider is moved — no jerk on startup.
+  syncTargetsTo(pos);
+  connectWS();
+}
+
+function buildUI(pos) {
+  const container = el("joints");
+  container.innerHTML = "";
+  for (const name of Object.keys(limits)) {
+    const { min, max } = limits[name];
+    const unit = unitFor(name);
+    const div = document.createElement("div");
+    div.className = "joint";
+    div.innerHTML = `
+      <div class="row">
+        <span class="name">${name}</span>
+        <span class="vals">
+          actual <b id="act-${name}">–</b>${unit}
+          · target <b id="tgt-${name}">–</b>${unit}
+          <span style="opacity:.55">[${min}, ${max}]</span>
+        </span>
+      </div>
+      <input type="range" id="slider-${name}"
+             min="${min}" max="${max}" step="0.1" value="${pos[name]}">
+    `;
+    container.appendChild(div);
+    const s = div.querySelector("input");
+    s.addEventListener("input", () => { targets[name] = parseFloat(s.value); });
+    s.addEventListener("pointerdown", () => dragging.add(name));
+    s.addEventListener("pointerup",   () => dragging.delete(name));
+    s.addEventListener("pointercancel", () => dragging.delete(name));
+  }
+}
+
+function syncTargetsTo(pos) {
+  for (const name of Object.keys(limits)) {
+    targets[name] = pos[name];
+    el("slider-" + name).value = pos[name];
+    el("tgt-" + name).textContent = pos[name].toFixed(1);
+  }
+}
+
+function connectWS() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => { setConn(true); sendStep(); };
+
+  ws.onmessage = (ev) => {
+    const data = JSON.parse(ev.data);
+    if (data.error) { console.warn("step error:", data.error); sendStep(); return; }
+    applyPositions(data.positions);
+    // Immediately request the next step. This send→reply→send loop self-paces
+    // to whatever rate the serial bus sustains — no artificial cap.
+    sendStep();
+  };
+
+  ws.onclose = () => { setConn(false); setTimeout(connectWS, 500); };  // auto-reconnect
+  ws.onerror = () => ws.close();
+}
+
+function sendStep() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  // While stopped, send an empty target set: the server still replies with
+  // fresh positions for the display but commands no motion.
+  ws.send(JSON.stringify({ angles: stopped ? {} : targets }));
+}
+
+function applyPositions(pos) {
+  // After a resume / re-sync, snap targets to actual so we don't lunge to a
+  // stale slider value. Do it here, where we have fresh positions in hand.
+  if (resyncPending) { syncTargetsTo(pos); resyncPending = false; }
+  for (const name of Object.keys(limits)) {
+    el("act-" + name).textContent = pos[name].toFixed(1);
+    el("tgt-" + name).textContent = (targets[name] ?? pos[name]).toFixed(1);
+    // Don't fight the user: only snap a slider to actual when they aren't holding it.
+    if (!dragging.has(name)) el("slider-" + name).value = pos[name];
+  }
+}
+
+function setConn(ok) {
+  el("conn-dot").className = "dot " + (ok ? "ok" : "bad");
+  el("conn-text").textContent = ok
+    ? (stopped ? "connected · STOPPED" : "connected")
+    : "backend unreachable";
+}
+
+el("stop").addEventListener("click", () => {
+  stopped = !stopped;
+  // Send the safety command over the same WS channel. Also POST as a belt-and-
+  // suspenders fallback in case the socket is mid-reconnect.
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ cmd: stopped ? "stop" : "resume" }));
+  }
+  fetch(stopped ? "/stop" : "/resume", { method: "POST" }).catch(() => {});
+  el("stop").textContent = stopped ? "STOPPED — click to resume" : "STOP";
+  el("stop").classList.toggle("stopped", stopped);
+  // On resume, re-sync targets to current pose (applied on next frame).
+  if (!stopped) resyncPending = true;
+});
+
+el("sync").addEventListener("click", () => { resyncPending = true; });
+
+init();
+</script>

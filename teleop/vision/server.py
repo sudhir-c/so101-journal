@@ -11,9 +11,9 @@ This matters for two reasons:
     monotonically increasing timestamps -- one owner thread guarantees both.
   * Inference cost stays constant no matter how many browser tabs are watching.
 
-Run:
-    .venv/bin/python server.py --list-cameras
-    .venv/bin/python server.py --camera 1 --side right
+Run (from the repo root, so `teleop` is importable):
+    .venv/bin/python -m teleop.vision.server --list-cameras
+    .venv/bin/python -m teleop.vision.server --camera 1 --side right
 """
 
 from __future__ import annotations
@@ -30,21 +30,21 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from arm_pose.camera import (
+from .camera import (
     DEFAULT_CAMERA_INDEX,
     Camera,
     format_camera_table,
     list_cameras,
     snapshot_cameras,
 )
-from arm_pose.overlay import draw_overlay
-from arm_pose.pose_math import ArmState, GripperConfig, QualityConfig
-from arm_pose.tracker import ArmTracker, TrackerConfig
+from .overlay import draw_overlay
+from .pose_math import ArmState, GripperConfig, QualityConfig
+from .tracker import ArmTracker, TrackerConfig
 
 HERE = Path(__file__).resolve().parent
 
 # --------------------------------------------------------------------------- #
-# Gripper thresholds live here (and in arm_pose/pose_math.py:GripperConfig).
+# Gripper thresholds live here (and in teleop/vision/pose_math.py:GripperConfig).
 # Raise CLOSED if a full pinch never quite reads 0.00; lower OPEN if a wide
 # spread never quite reaches 1.00.  The `raw` value on the web UI is the number
 # these are compared against, so tune by watching it.
@@ -283,7 +283,7 @@ def main() -> None:
     if args.list_cameras:
         print("\nAvailable cameras:")
         print(format_camera_table(list_cameras()))
-        print("\nNot sure which index is you?  Run:  python server.py --snapshot\n")
+        print("\nNot sure which index is you?  Run:  python -m teleop.vision.server --snapshot\n")
         return
 
     if args.snapshot:

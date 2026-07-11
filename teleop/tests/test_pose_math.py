@@ -18,9 +18,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Repo root, so `teleop` is importable as a package.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from arm_pose.pose_math import (  # noqa: E402
+from teleop.vision.pose_math import (  # noqa: E402
     GripperConfig,
     HandIdx,
     PoseIdx,

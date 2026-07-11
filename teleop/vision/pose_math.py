@@ -2,7 +2,7 @@
 
 This module is the reusable core of the project and is deliberately free of any
 video, MediaPipe, or serving dependencies -- it needs only ``numpy`` and the
-stdlib.  A later project can ``from arm_pose.pose_math import compute_arm_state``
+stdlib.  A later project can ``from teleop.vision.pose_math import compute_arm_state``
 and feed it landmarks from any source.
 
 Design notes
@@ -261,7 +261,7 @@ def compute_arm_state(
     side:
         Which of the operator's arms to track: ``"left"`` or ``"right"``.  This is
         an *anatomical* side and must already account for any mirroring of the
-        frame -- see ``arm_pose.tracker``, which resolves that before calling us.
+        frame -- see ``teleop.vision.tracker``, which resolves that before calling us.
     image_size:
         ``(width, height)`` in pixels, used to undo MediaPipe's per-axis
         normalization so angles are measured in true pixel space.  Pass

@@ -45,10 +45,17 @@ const GRIPPER = "gripper";
 
 let limits = {};
 let targets = {};            // desired angle per joint
+let lastPos = {};            // most recent actual positions from the arm
 let dragging = new Set();    // joints the user is currently holding
 let stopped = false;
 let ws = null;
+let inFlight = false;        // a frame has been sent and we're awaiting its reply
 let resyncPending = false;   // snap targets to actual on next frame (after resume / re-sync)
+const SEND_HZ = 30;          // fixed command/poll cadence
+
+// A joint is "settling" when it hasn't yet reached its target (within this
+// tolerance). We keep commanding until settled, then go idle.
+const REACHED_TOL = 0.5;     // degrees / %
 
 const el = (id) => document.getElementById(id);
 const unitFor = (name) => (name === GRIPPER ? "%" : "°");
@@ -61,6 +68,7 @@ async function init() {
   // stream holds still until a slider is moved — no jerk on startup.
   syncTargetsTo(pos);
   connectWS();
+  setInterval(tick, 1000 / SEND_HZ);   // fixed-cadence sender
 }
 
 function buildUI(pos) {
@@ -103,37 +111,77 @@ function syncTargetsTo(pos) {
 function connectWS() {
   ws = new WebSocket(`ws://${location.host}/ws`);
 
-  ws.onopen = () => { setConn(true); sendStep(); };
-
-  ws.onmessage = (ev) => {
-    const data = JSON.parse(ev.data);
-    if (data.error) { console.warn("step error:", data.error); sendStep(); return; }
-    applyPositions(data.positions);
-    // Immediately request the next step. This send→reply→send loop self-paces
-    // to whatever rate the serial bus sustains — no artificial cap.
-    sendStep();
+  ws.onopen = () => {
+    setConn(true);
+    inFlight = false;
+    // SAFETY: on every (re)connect, re-sync targets to the arm's ACTUAL pose
+    // before commanding anything, so a reconnect after the arm moved (torque
+    // released while the server was down, or bumped by hand) can't lunge to a
+    // stale target. The timer's next frame does the actual read.
+    resyncPending = true;
   };
 
-  ws.onclose = () => { setConn(false); setTimeout(connectWS, 500); };  // auto-reconnect
+  ws.onmessage = (ev) => {
+    inFlight = false;                       // reply arrived; the next tick may send
+    const data = JSON.parse(ev.data);
+    if (data.error) { console.warn("step error:", data.error); return; }
+    // Keep the UI's stopped state consistent with the server's authoritative one.
+    if (typeof data.stopped === "boolean" && data.stopped !== stopped) {
+      setStopped(data.stopped);
+    }
+    applyPositions(data.positions);
+  };
+
+  ws.onclose = () => { inFlight = false; setConn(false); setTimeout(connectWS, 500); };  // auto-reconnect
   ws.onerror = () => ws.close();
 }
 
-function sendStep() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  // While stopped, send an empty target set: the server still replies with
-  // fresh positions for the display but commands no motion.
-  ws.send(JSON.stringify({ angles: stopped ? {} : targets }));
+// Are we actively moving? True while dragging, or while any joint is still
+// travelling to a target the user set. When neither, we're idle.
+function isActive() {
+  if (dragging.size > 0) return true;
+  for (const name of Object.keys(limits)) {
+    const tgt = targets[name], act = lastPos[name];
+    if (tgt != null && act != null && Math.abs(tgt - act) > REACHED_TOL) return true;
+  }
+  return false;
+}
+
+// Fixed-cadence sender. Runs for the life of the page from a setInterval, so a
+// foreground tab commands reliably (unlike a self-clocked send→reply loop, which
+// Chrome throttles). `inFlight` paces us to the serial bus and prevents pile-up.
+function tick() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || inFlight) return;
+  // Only send motion commands while actively moving. When idle (or stopped) we
+  // send an empty frame: the server still replies with positions for the live
+  // readout, but commands NO motion. This is the key safety property — the arm
+  // holds position via its own motor torque and never moves on its own.
+  const commanding = isActive() && !stopped;
+  inFlight = true;
+  try {
+    ws.send(JSON.stringify({ angles: commanding ? targets : {} }));
+  } catch (e) {
+    inFlight = false;
+  }
 }
 
 function applyPositions(pos) {
+  lastPos = pos;
   // After a resume / re-sync, snap targets to actual so we don't lunge to a
   // stale slider value. Do it here, where we have fresh positions in hand.
   if (resyncPending) { syncTargetsTo(pos); resyncPending = false; }
+  // Evaluate once, before mutating targets below.
+  const idle = !isActive();
   for (const name of Object.keys(limits)) {
     el("act-" + name).textContent = pos[name].toFixed(1);
     el("tgt-" + name).textContent = (targets[name] ?? pos[name]).toFixed(1);
-    // Don't fight the user: only snap a slider to actual when they aren't holding it.
-    if (!dragging.has(name)) el("slider-" + name).value = pos[name];
+    // While idle, keep each un-held slider + its target tracking the arm's
+    // actual position, so there's nothing stale to snap to and a new drag
+    // starts from where the arm really is.
+    if (!dragging.has(name)) {
+      el("slider-" + name).value = pos[name];
+      if (idle) targets[name] = pos[name];
+    }
   }
 }
 
@@ -144,21 +192,35 @@ function setConn(ok) {
     : "backend unreachable";
 }
 
+// Reflect a stopped state in the UI (button + status). On resume, re-sync
+// targets to the current pose so we never lunge to a stale slider value.
+function setStopped(next) {
+  stopped = next;
+  el("stop").textContent = stopped ? "STOPPED — click to resume" : "STOP";
+  el("stop").classList.toggle("stopped", stopped);
+  if (!stopped) resyncPending = true;
+}
+
 el("stop").addEventListener("click", () => {
-  stopped = !stopped;
+  const next = !stopped;
   // Send the safety command over the same WS channel. Also POST as a belt-and-
   // suspenders fallback in case the socket is mid-reconnect.
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ cmd: stopped ? "stop" : "resume" }));
+    ws.send(JSON.stringify({ cmd: next ? "stop" : "resume" }));
   }
-  fetch(stopped ? "/stop" : "/resume", { method: "POST" }).catch(() => {});
-  el("stop").textContent = stopped ? "STOPPED — click to resume" : "STOP";
-  el("stop").classList.toggle("stopped", stopped);
-  // On resume, re-sync targets to current pose (applied on next frame).
-  if (!stopped) resyncPending = true;
+  fetch(next ? "/stop" : "/resume", { method: "POST" }).catch(() => {});
+  setStopped(next);
 });
 
 el("sync").addEventListener("click", () => { resyncPending = true; });
+
+// When the tab regains visibility/focus (e.g. you open DevTools or switch back),
+// re-sync targets to the arm's actual pose before the loop resumes, so a tab
+// that was throttled while backgrounded can't drive the arm to a stale target.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) resyncPending = true;
+});
+window.addEventListener("focus", () => { resyncPending = true; });
 
 init();
 </script>

@@ -273,7 +273,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="pinch ratio at/above which gripper reads 1.0")
 
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--port", type=int, default=8080)
     return p.parse_args(argv)
 
 

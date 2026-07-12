@@ -23,7 +23,7 @@ The browser talks to this over a WebSocket. As I drag a slider, the page streams
 
 That last part had a subtle bug that took me a while to pin down. My first version clocked itself off the WebSocket replies — send, wait for the reply, send again — which on localhost spins thousands of times a second. Chrome quietly throttles a loop like that when the tab isn't focused, so my slider drags weren't getting sent... until I opened the dev tools, which disabled the throttling and made the arm suddenly lurch to catch up. Very confusing to debug on real hardware 😅. The fix was to drive the sending from a fixed 30 Hz timer instead, decoupled from the replies, which behaves predictably.
 
-https://github.com/user-attachments/assets/PLACEHOLDER-sliders
+![The slider teleop dashboard — six joints, live actual/target readouts, and STOP](images/10_slider_dashboard.png)
 
 ## Safety features
 

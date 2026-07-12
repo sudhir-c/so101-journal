@@ -54,7 +54,7 @@ state.elbow_flex   # degrees, or None if it couldn't be measured
 
 The `image_size` there isn't decorative: MediaPipe normalizes x by the width and y by the height *independently*, so on a 16:9 frame the two axes end up with different pixel scales, and an angle read straight off the normalized coordinates comes out skewed. Passing the real frame size back in rescales the axes so the geometry is honest.
 
-https://github.com/user-attachments/assets/PLACEHOLDER-tracking
+![The tracker: pose skeleton + hand landmarks overlaid, with live joint values and tracking confidence](images/11_arm_tracking.png)
 
 ## Being honest about uncertainty
 

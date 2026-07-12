@@ -39,6 +39,10 @@ robot.step(cmd)                                           # still through the sa
 
 I also added a second, optional camera feed to the dashboard pointed at the robot itself, so I can watch my arm and Spectre side by side while I drive.
 
-https://github.com/user-attachments/assets/PLACEHOLDER-fullmirror
+
+
+https://github.com/user-attachments/assets/b141c2d3-faf0-436c-873e-30b0ae0a26b6
+
+
 
 This process was more of a "for-fun" exploration than something strictly related to robot learning, but I thought it was cool so I pursued it. I will try to come back and expand on this work as I get more ideas for other interesting things to do.

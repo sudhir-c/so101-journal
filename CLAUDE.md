@@ -1,19 +1,27 @@
 # so-101-arm
 
-SO-101 robot arm project. The teleoperation code lives under `teleop/` in two
-halves, currently **not connected to each other**:
+SO-101 robot arm project. The teleoperation code lives under `teleop/` in three
+parts — two standalone tools plus a **mirror** that links them:
 
 | | what | entry point (run from repo root) |
 |---|---|---|
 | **robot** | serial control of the `spectre` SO-101 follower arm | `python -m teleop.robot.server` — `teleop/robot/{control,server}.py`, `teleop/robot/README.md` |
 | **vision** | webcam → arm/hand pose → joint values. **No hardware at all.** | `python -m teleop.vision.server` — `teleop/vision/`, `teleop/vision/README.md` |
+| **mirror** | live: your arm (vision) → the follower (robot), one process | `python -m teleop.mirror.server` — `teleop/mirror/`, `teleop/mirror/README.md` |
+
+The mirror **imports** the other two (it does not fork them), so **robot** and
+**vision** still run independently and unchanged. The mirror is the sole serial
+owner while it runs. See "Mirror" below.
+
+`teleop/README.md` is the overview + how-to-run for all three. `teleop/scripts/`
+holds helpers: `download_models.sh` (fetch MediaPipe `.task` bundles — required
+before vision/mirror run), `cam_viz.py` (quick OpenCV camera preview), and
+`teleop.sh` (LeRobot **physical leader→follower** teleop: `so101_leader`
+"phantom" → `spectre` — a *separate* serial owner, not the mirror).
 
 (Outside `teleop/`: `journal/` is the write-up, the `*_policy/` dirs and
-`outputs/` are training artifacts, `scripts/` holds journal video tooling.)
-
-The end goal is teleoperation: mirror a human arm onto the robot. The vision half
-computes human joint angles; the robot half accepts robot joint commands. **The
-retarget layer between them does not exist yet** — see "Next step" below.
+`outputs/` are training artifacts, top-level `scripts/` holds journal video
+tooling, e.g. `video_compressor.py`.)
 
 ---
 
@@ -129,38 +137,36 @@ out of frame correctly drags the whole reading down.
 
 ---
 
-## Next step: the retarget layer (not built)
+## Mirror (`teleop/mirror/`)
 
-The vision values are **raw human joint angles** and are **NOT normalized to the
-SO-101's ranges**. Feeding them into `teleop.robot.control`'s `set_joints()`
-directly would be unsafe. The mismatch is in units, sign, zero point, *and*
-cardinality:
+The retarget layer that links vision → robot. One process: capture thread
+(`Camera` + `ArmTracker` + `draw_overlay`) + `RobotController` + FastAPI, on
+port **8090**. Imports both halves; modifies neither.
 
-| | vision emits | SO-101 `JOINT_LIMITS` |
-|---|---|---|
-| `shoulder_lift` | 0…180° **unsigned**, 0 = hanging | −102.7…+102.7 **signed**, zero-centred |
-| `elbow_flex` | 0…180°, **180 = straight** | −96.2…+96.2, **0 ≈ straight** |
-| `wrist_flex` | 0…180° | −100.5…+100.5 |
-| `gripper` | 0.0…1.0 | 0…100 (percent) |
-| `shoulder_pan` | — *not produced* | −102.3…+102.3 |
-| `wrist_roll` | — *excluded by design* | −180…+180 |
+- `mapping.py` — the human→robot map, **per joint**. Arm joints use a
+  **pivot/gain** form `robot = robot_pivot + gain·(human − human_pivot)` (in
+  `PIVOT`); the gripper uses the plain affine (`0..1 → 0..100%`). `wrist_roll` and
+  `shoulder_pan` are **held at 0** (`HELD`) — not driven. Every target is clamped
+  to `JOINT_LIMITS`. Current tuned values: shoulder_lift `pivot 90→0, gain −1`;
+  elbow_flex `90→0, +1`; wrist_flex `180→90, +1`.
+- `server.py` — drives the robot only when **ENABLEd**: a `RAMP_SECONDS` (1.5s)
+  ramp from the arm's actual pose to the mapped target, then live tracking, every
+  frame through `RobotController.step()` (clamp + velocity-limit). Launches in
+  **PREVIEW** (no motion). Hold-on-lost-tracking re-sends the last good target,
+  never a bad-frame guess. Two cameras: tracking (drives pose) + optional
+  **monitor** passthrough (`/video2`, point it at the arm).
+- STOP = **go limp** via the additive `RobotController.disable_torque()` /
+  `enable_torque()` (see robot half). So an extended arm can drop on STOP.
 
-A hanging arm reads `shoulder_lift: 0°` in vision, but `0` on the robot is
-*mid-range* — sent raw, the arm would snap to the middle of its travel. And
-`elbow_flex: 180` (straight) would slam into the `+96.2` limit.
+Human-vs-robot conventions the map bridges (units, sign, zero point differ):
+`shoulder_lift` human 0=hanging/180=up vs robot ±102.7 zero-centred; `elbow_flex`
+human 180=straight vs robot 0≈straight ±96.2; `gripper` 0..1 vs 0..100%.
 
-Two things to solve before 5-DOF mirroring works:
-
-- **`shoulder_lift` is unsigned** — an arm swung out to the right and one swung
-  across the body both read 90°. You need a signed lift, or a separate estimate.
-- **`shoulder_pan` has no vision source.** Likely derivable from the
-  shoulder-to-shoulder axis, but it is not computed today.
-
-Build this as a **new module** (e.g. `teleop/retarget.py`) that takes an
-`ArmState` and returns the `{joint: angle}` dict
-`teleop.robot.control.RobotController.step()` already accepts, clamping to
-`JOINT_LIMITS` on the way out. **Do not put robot semantics into
-`teleop/vision/pose_math.py`** — its independence is what makes it reusable.
+**Not yet built:** Phase 2 **calibration capture** (record real per-joint human
+min/max → `mirror_calibration.json`; today `mapping.DEFAULT_HUMAN_RANGE` holds
+placeholders, and the pivot joints are calibration-independent anyway). Also
+`shoulder_pan` has no vision source, and `shoulder_lift` is unsigned. Keep robot
+semantics OUT of `teleop/vision/pose_math.py` (numpy-only reusable core).
 
 ---
 
@@ -172,8 +178,10 @@ See `teleop/robot/README.md`. Key hazards repeated here because they bite hard:
   reloads endlessly, and each reload reconnects the serial port and makes the arm
   go limp. The `python -m teleop.robot.server` entry point runs a single,
   non-reloading server.
-- The robot server is the **sole owner of the serial port**. Do not run
-  `lerobot-teleoperate` / `lerobot-record` while it is up.
-- The robot UI (`teleop.robot.server`) serves on port 8000; the vision server
-  (`teleop.vision.server`) on 8080. They can run together, but only one process
-  can hold the webcam at a time.
+- **Sole owner of the serial port.** Only one of `teleop.robot.server`,
+  `teleop.mirror.server`, or any `lerobot-*` command may hold it at a time.
+- `control.py`'s `stop()`/`resume()`/`step()` are the stable core (the slider UI
+  depends on their exact behavior — `stop()` **freezes**, does not go limp). The
+  mirror's go-limp STOP uses the **additive** `disable_torque()`/`enable_torque()`;
+  don't change `stop()` semantics to add torque-off — keep it additive.
+- Ports: robot UI **8000**, vision **8080**, mirror **8090**.

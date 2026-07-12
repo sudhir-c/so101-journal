@@ -26,18 +26,35 @@ From the **repo root**, with nothing else holding the serial port
 Then open **http://localhost:8090/**. Use `--camera N` to pick your webcam
 (run the visualizer's `--snapshot` if unsure which index is you).
 
-## Status: Phase 1 — PREVIEW ONLY (the robot does not move)
+## Using it
 
-The UI shows: annotated webcam feed, live **human** angles, mapped robot
-**target** angles, the robot's **actual** read-back angles, a 2D schematic pose
-preview (blue = target, grey = actual), and a tracking-quality light.
+Launches in **PREVIEW** — the robot does not move. The UI shows: annotated
+webcam feed, live **human** angles, mapped robot **target** angles, the robot's
+**actual** read-back angles, a 2D schematic pose preview (blue = target,
+grey = actual), a tracking-quality light, an optional **arm monitor camera**, and
+the ENABLE / STOP controls.
 
-- **STOP** already works: it disables torque (arm goes limp) and rejects motion;
-  the same button becomes **RESUME** (re-hold at the current pose, no snap).
-- **ENABLE** is disabled until Phase 3 (which adds ramp-on-enable + live motion).
+- **ENABLE mirror** — the robot smoothly **ramps** from its current pose to your
+  mapped pose over `RAMP_SECONDS` (1.5 s), then live-tracks your arm through the
+  safety core. Press again to **DISABLE** (arm holds, torque stays on).
+- **STOP · go limp** — immediately disables torque (arm goes limp) and rejects
+  motion. Becomes **RESUME · re-hold** (re-enable torque at the current pose, no
+  snap; you're back in preview until you ENABLE again).
+- **Hold on lost tracking** — if arm/hand visibility drops, the last good target
+  is held; no angles are sent from a bad frame. Live tracking resumes smoothly.
 
-Coming next: Phase 2 (calibration capture), Phase 3 (ENABLE + ramp, driving
-gripper + elbow first), Phase 4 (add shoulder_lift + wrist_flex, tune).
+> ⚠️ When you ENABLE, the real arm moves. Keep the workspace clear and a hand
+> near STOP. Note STOP makes the arm go **limp**, so an extended arm may drop —
+> support it.
+
+### Two cameras
+
+- **Tracking camera** (top selector) — points at *you*; drives the pose.
+- **Arm monitor camera** (optional, second selector) — a processing-free feed you
+  can point at the *robot* to watch it while you move. Choose "off" to disable.
+
+Both switch live; pick the index whose feed shows what you want (macOS camera
+indices are unstable, so choose by the picture).
 
 ## The mapping (affine, per joint)
 

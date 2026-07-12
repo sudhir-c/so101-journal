@@ -49,9 +49,13 @@ ROBOT_ID = "spectre"
 MIN_ARM_VISIBILITY = 0.6
 MIN_HAND_CONFIDENCE = 0.5
 
-# How often to read the robot's actual joint positions (Hz). Kept below the
-# camera rate so serial I/O doesn't throttle the video pipeline.
+# How often to read the robot's actual joint positions (Hz) in PREVIEW. When
+# enabled, every frame commands+reads, so this only paces the idle read.
 ROBOT_READ_HZ = 15.0
+
+# On ENABLE, interpolate from the arm's current pose to the mapped target pose
+# over this many seconds before live tracking begins (avoids a lurch).
+RAMP_SECONDS = 1.5
 
 
 def _round(v, n=1):
@@ -79,8 +83,9 @@ class MirrorPipeline:
         self._actual: dict[str, float] = {}       # last robot read-back
         self._tracking_ok = False
 
-        # Control flags (enable is inert in Phase 1).
+        # Motion control.
         self._enabled = False
+        self._ramp: dict | None = None  # {start, goal, t0} during ramp-on-enable
 
         # Camera selection (switchable live from the UI).
         self._camera_index = args.camera
@@ -198,18 +203,7 @@ class MirrorPipeline:
                 else:
                     new_targets = {}  # HOLD: never send angles from a bad frame
 
-                # Read robot actual positions (throttled).
-                actual = None
-                if now - self._last_robot_read >= 1.0 / ROBOT_READ_HZ:
-                    try:
-                        actual = self.robot.get_positions()
-                        self._last_robot_read = now
-                    except Exception:  # serial hiccup → keep last known
-                        actual = None
-
-                # --- PHASE 1: preview only. NO motion is commanded. ---
-                # Phase 3 will add ramp-on-enable then per-frame robot.step(targets).
-
+                # Publish the frame + update last-good targets first.
                 with self._lock:
                     if ok:
                         self._jpeg = buf.tobytes()
@@ -218,7 +212,27 @@ class MirrorPipeline:
                     self._tracking_ok = tracking_ok
                     if new_targets:
                         self._targets.update(new_targets)  # update only fresh joints
-                    if actual is not None:
+                    enabled = self._enabled
+
+                # Drive the robot (or just read it, in preview).
+                stopped = self.robot.is_stopped
+                torque = self.robot.is_torque_enabled
+                actual = None
+                try:
+                    if enabled and not stopped and torque:
+                        # Command through the safety core (clamp + velocity-limit).
+                        # step() returns the present positions, so no extra read.
+                        cmd = self._command_for_frame(now)
+                        if cmd:
+                            actual = self.robot.step(cmd)
+                    if actual is None and now - self._last_robot_read >= 1.0 / ROBOT_READ_HZ:
+                        actual = self.robot.get_positions()
+                        self._last_robot_read = now
+                except Exception:  # serial hiccup → keep last known
+                    actual = None
+
+                if actual is not None:
+                    with self._lock:
                         self._actual = actual
                 self._frame_event.set()
         finally:
@@ -227,22 +241,61 @@ class MirrorPipeline:
             tracker.close()
 
     # ------------------------------------------------------------------ #
-    # Control endpoints support (Phase 1: torque + flags only)
+    # Motion control
     # ------------------------------------------------------------------ #
+    def _command_for_frame(self, now: float) -> dict[str, float] | None:
+        """The joint command for this frame: a ramp interpolation right after
+        ENABLE, otherwise the live mapped targets. Held joints ride along at
+        their fixed constant. Returns None if nothing to command yet."""
+        with self._lock:
+            ramp = self._ramp
+            targets = dict(self._targets)
+            if ramp is not None:
+                alpha = (now - ramp["t0"]) / RAMP_SECONDS
+                if alpha < 1.0:
+                    start, goal = ramp["start"], ramp["goal"]
+                    return {j: start[j] + alpha * (goal[j] - start[j]) for j in goal}
+                self._ramp = None  # ramp done → fall through to live tracking
+        # Live: last-good controlled targets (held on lost tracking) + held joints.
+        cmd = {j: targets[j] for j in mapping.CONTROLLED if j in targets}
+        cmd.update(mapping.HELD)
+        return cmd or None
+
+    def enable(self) -> None:
+        """Begin mirroring: ensure torque, snapshot a ramp from the arm's actual
+        pose to the current mapped target, then live-track once the ramp ends."""
+        if not self.robot.is_connected:
+            return
+        if not self.robot.is_torque_enabled:
+            self.robot.enable_torque()
+        self.robot.resume()
+        try:
+            actual = self.robot.get_positions()
+        except Exception:
+            return
+        with self._lock:
+            goal = {j: self._targets[j] for j in mapping.CONTROLLED if j in self._targets}
+            goal.update(mapping.HELD)
+            start = {j: actual.get(j, goal[j]) for j in goal}
+            self._ramp = {"start": start, "goal": goal, "t0": time.perf_counter()}
+            self._enabled = True
+
+    def disable(self) -> None:
+        """Stop mirroring (arm holds its current pose; torque stays on)."""
+        with self._lock:
+            self._enabled = False
+            self._ramp = None
+
     def emergency_stop(self) -> None:
         self.robot.stop()            # reject any future motion commands
         self.robot.disable_torque()  # go limp
         with self._lock:
             self._enabled = False
+            self._ramp = None
 
     def resume(self) -> None:
         self.robot.enable_torque()   # re-hold current pose (no snap)
-        self.robot.resume()
-
-    def set_enabled(self, value: bool) -> None:
-        # Phase 1: tracked but does not drive motion.
-        with self._lock:
-            self._enabled = value
+        self.robot.resume()          # stays in preview until ENABLE again
 
     def switch_camera(self, index: int) -> None:
         with self._lock:
@@ -265,6 +318,7 @@ class MirrorPipeline:
             fps = self._fps
             tracking_ok = self._tracking_ok
             enabled = self._enabled
+            ramping = self._ramp is not None
             camera_index = self._camera_index
             err = self._error
         # Held joints are shown as their fixed constants.
@@ -273,8 +327,9 @@ class MirrorPipeline:
             "error": err,
             "fps": round(fps, 1),
             "camera_index": camera_index,
-            "mode": "preview",  # Phase 1 is always preview
+            "mode": "enabled" if enabled else "preview",
             "enabled": enabled,
+            "ramping": ramping,
             "stopped": self.robot.is_stopped,
             "torque": self.robot.is_torque_enabled,
             "connected": self.robot.is_connected,
@@ -310,17 +365,109 @@ class MirrorPipeline:
             yield jpeg + b"\r\n"
 
 
+class MonitorFeed:
+    """A second, processing-free camera feed (e.g. pointed at the arm). Off by
+    default; switchable live. Runs its own thread and publishes JPEGs."""
+
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self._lock = threading.Lock()
+        self._jpeg: bytes | None = None
+        self._event = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._index: int | None = None     # None = off
+        self._desired: int | None = None
+        self._dirty = False
+        self._error: str | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="monitor", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+
+    def switch(self, index: int | None) -> None:
+        with self._lock:
+            self._desired = index
+            self._dirty = True
+
+    def current(self) -> int | None:
+        with self._lock:
+            return self._index
+
+    def _run(self) -> None:
+        a = self.args
+        camera: Camera | None = None
+        current: int | None = None
+        encode = [int(cv2.IMWRITE_JPEG_QUALITY), a.jpeg_quality]
+        while not self._stop.is_set():
+            with self._lock:
+                dirty, desired = self._dirty, self._desired
+                self._dirty = False
+            if dirty and desired != current:
+                if camera is not None:
+                    camera.release()
+                    camera = None
+                current = desired
+                with self._lock:
+                    self._index = current
+                    self._error = None
+                if desired is not None:
+                    try:  # monitor view of the arm: no selfie mirror
+                        camera = Camera(index=desired, width=a.width, height=a.height,
+                                        fps=a.fps, mirror=False)
+                    except RuntimeError as exc:
+                        with self._lock:
+                            self._error = f"monitor camera {desired}: {exc}"
+                        camera = None
+            if camera is None:
+                time.sleep(0.1)
+                continue
+            frame = camera.read()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+            ok, buf = cv2.imencode(".jpg", frame, encode)
+            if ok:
+                with self._lock:
+                    self._jpeg = buf.tobytes()
+                self._event.set()
+        if camera is not None:
+            camera.release()
+
+    def mjpeg(self):
+        boundary = b"--frame\r\n"
+        while not self._stop.is_set():
+            self._event.wait(timeout=1.0)
+            self._event.clear()
+            with self._lock:
+                jpeg = self._jpeg
+            if jpeg is None:
+                continue
+            yield boundary + b"Content-Type: image/jpeg\r\n"
+            yield f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
+            yield jpeg + b"\r\n"
+
+
 class CameraReq(BaseModel):
     index: int
+    slot: str = "track"   # "track" (pose camera) or "monitor" (arm view)
 
 
 def build_app(args: argparse.Namespace) -> FastAPI:
     pipeline = MirrorPipeline(args)
+    monitor = MonitorFeed(args)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         pipeline.start()
+        monitor.start()
         yield
+        monitor.stop()
         pipeline.stop()
 
     app = FastAPI(title="SO-101 Mirror Teleop", lifespan=lifespan)
@@ -333,6 +480,12 @@ def build_app(args: argparse.Namespace) -> FastAPI:
     def video():
         return StreamingResponse(
             pipeline.mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame"
+        )
+
+    @app.get("/video2")
+    def video2():
+        return StreamingResponse(
+            monitor.mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame"
         )
 
     @app.get("/api/state")
@@ -353,26 +506,31 @@ def build_app(args: argparse.Namespace) -> FastAPI:
     def cameras():
         # Indices are the reliable handle; device names are shown only as an
         # unordered hint (macOS doesn't map names→indices reliably). Pick the
-        # index whose live feed shows your face.
+        # index whose live feed shows what you want.
         return {
             "indices": list(range(5)),
             "names": macos_camera_names(),
-            "current": pipeline.current_camera_index(),
+            "current_track": pipeline.current_camera_index(),
+            "current_monitor": monitor.current(),
         }
 
     @app.post("/api/camera")
     def set_camera(req: CameraReq):
-        pipeline.switch_camera(req.index)
-        return {"ok": True, "index": req.index}
+        if req.slot == "monitor":
+            # index < 0 means "off".
+            monitor.switch(None if req.index < 0 else req.index)
+        else:
+            pipeline.switch_camera(req.index)
+        return {"ok": True, "index": req.index, "slot": req.slot}
 
     @app.post("/api/enable")
     def enable():
-        pipeline.set_enabled(True)
-        return {"ok": True, "enabled": True}
+        pipeline.enable()
+        return {"ok": True, "enabled": pipeline._enabled}
 
     @app.post("/api/disable")
     def disable():
-        pipeline.set_enabled(False)
+        pipeline.disable()
         return {"ok": True, "enabled": False}
 
     return app

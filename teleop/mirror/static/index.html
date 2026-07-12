@@ -28,7 +28,7 @@
 </style>
 
 <h1>SO-101 Mirror — <span id="mode">preview</span></h1>
-<div class="banner" id="banner">PREVIEW — the robot will NOT move. (Live motion arrives in Phase 3.)</div>
+<div class="banner" id="banner">PREVIEW — the robot will NOT move until you press ENABLE.</div>
 <div id="err" style="color:#e74c3c; font-weight:600; margin-bottom:.6rem"></div>
 
 <div class="cols">
@@ -46,6 +46,12 @@
       <h2>Tracking quality</h2>
       <div><span class="dot" id="q-dot"></span><b id="q-text">…</b></div>
       <div class="status" id="q-detail"></div>
+    </div>
+
+    <div class="card">
+      <h2>Arm monitor camera (optional)</h2>
+      <select id="cam2" style="width:100%; padding:.4rem"></select>
+      <img id="feed2" src="/video2" alt="arm monitor" style="width:100%; border-radius:8px; margin-top:.6rem; background:#0003; display:none">
     </div>
   </div>
 
@@ -71,7 +77,7 @@
     <div class="card">
       <h2>Controls</h2>
       <div class="toolbar">
-        <button id="enable" disabled title="Live motion is added in Phase 3">ENABLE (Phase 3)</button>
+        <button id="enable">ENABLE mirror</button>
         <button id="stop">STOP · go limp</button>
       </div>
       <div class="status" id="ctl-status"></div>
@@ -195,6 +201,20 @@ function render(s) {
   el("ctl-status").textContent =
     `${s.connected ? "robot connected" : "robot DISCONNECTED"} · ${torqueTxt} · ${stoppedTxt}`;
   el("stop").textContent = s.torque ? "STOP · go limp" : "RESUME · re-hold";
+
+  // ENABLE toggle + banner reflect live/preview state.
+  el("enable").textContent = s.enabled ? "DISABLE mirror" : "ENABLE mirror";
+  el("enable").style.background = s.enabled ? "#27ae60" : "#7f8c8d";
+  const banner = el("banner");
+  if (s.enabled) {
+    banner.style.background = "#e74c3c"; banner.style.color = "#fff";
+    banner.textContent = s.ramping
+      ? "LIVE — ramping smoothly to your pose…"
+      : "LIVE — robot is mirroring your arm. Keep clear · STOP to go limp.";
+  } else {
+    banner.style.background = "#f39c12"; banner.style.color = "#111";
+    banner.textContent = "PREVIEW — the robot will NOT move until you press ENABLE.";
+  }
 }
 
 async function poll() {
@@ -211,35 +231,56 @@ el("stop").addEventListener("click", async () => {
   await fetch(s.torque ? "/api/stop" : "/api/resume", { method: "POST" });
 });
 
-// ── Camera selection ────────────────────────────────────────────────────────
-let camReady = false;
+// ── Camera selection (tracking + optional arm monitor) ──────────────────────
+function fillOptions(sel, indices, current, withOff) {
+  sel.innerHTML = "";
+  if (withOff) {
+    const o = document.createElement("option");
+    o.value = -1; o.textContent = "off";
+    if (current == null) o.selected = true;
+    sel.appendChild(o);
+  }
+  for (const i of indices) {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = "Camera index " + i;
+    if (i === current) o.selected = true;
+    sel.appendChild(o);
+  }
+}
 async function loadCameras() {
   try {
     const c = await (await fetch("/api/cameras")).json();
-    const sel = el("cam");
-    sel.innerHTML = "";
-    for (const i of c.indices) {
-      const o = document.createElement("option");
-      o.value = i; o.textContent = "Camera index " + i;
-      if (i === c.current) o.selected = true;
-      sel.appendChild(o);
-    }
+    fillOptions(el("cam"), c.indices, c.current_track, false);
+    fillOptions(el("cam2"), c.indices, c.current_monitor, true);
+    el("feed2").style.display = (c.current_monitor == null) ? "none" : "block";
     el("cam-names").textContent = c.names && c.names.length
-      ? "detected devices (any order): " + c.names.join(", ") + " — pick the index that shows you"
-      : "pick the index whose feed shows your face";
-    camReady = true;
+      ? "detected devices (any order): " + c.names.join(", ")
+      : "pick the index whose feed shows what you want";
   } catch (e) { el("cam-names").textContent = "could not list cameras"; }
 }
-el("cam").addEventListener("change", async () => {
-  const index = parseInt(el("cam").value, 10);
-  el("cam-names").textContent = "switching to index " + index + "…";
+async function switchCamera(index, slot) {
   await fetch("/api/camera", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ index }),
+    body: JSON.stringify({ index, slot }),
   });
+}
+el("cam").addEventListener("change", async () => {
+  el("cam-names").textContent = "switching tracking camera…";
+  await switchCamera(parseInt(el("cam").value, 10), "track");
   setTimeout(loadCameras, 800);
 });
+el("cam2").addEventListener("change", async () => {
+  const v = parseInt(el("cam2").value, 10);
+  el("feed2").style.display = (v < 0) ? "none" : "block";
+  await switchCamera(v, "monitor");
+});
 el("cam-rescan").addEventListener("click", loadCameras);
+
+// ── ENABLE toggle ───────────────────────────────────────────────────────────
+el("enable").addEventListener("click", async () => {
+  const s = await (await fetch("/api/state")).json();
+  await fetch(s.enabled ? "/api/disable" : "/api/enable", { method: "POST" });
+});
 
 buildTable();
 loadCameras();

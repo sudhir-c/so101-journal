@@ -1,6 +1,6 @@
-# 7 - Third attempt at pick and place with randomized object placement
+# 07 - Third attempt at pick and place with randomized object placement
 
-As described in the [previous entry](https://github.com/sudhir-c/so101-journal/blob/main/journal/6_movingobjectv2.md), I was able to develop a policy which went through the correct macro-steps to pick up the object, and generally succeeded. I did not collect specifics on the success rate, since I was still noticing some failures so I wanted to improve the policy before I took specific numbers.
+As described in the [previous entry](https://github.com/sudhir-c/so101-journal/blob/main/journal/06_movingobjectv2.md), I was able to develop a policy which went through the correct macro-steps to pick up the object, and generally succeeded. I did not collect specifics on the success rate, since I was still noticing some failures so I wanted to improve the policy before I took specific numbers.
 
 I noticed the failures of the previous policy occurred mainly during the grasping step. The robot would pause at the general waypoint above the pickup zone, and as it lowered toward the object, the gripper would be slighlty misaligned, leading to an unsuccessful grasping motion. My hypothesis was that re-training with more trials would fix this, as the additional data would better "teach" the policy how to complete a successful grasping motion. 
 

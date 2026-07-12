@@ -1,4 +1,4 @@
-# 9 - Fifth attempt at pick and place with randomized object placement
+# 09 - Fifth attempt at pick and place with randomized object placement
 
 For my next attempt I made the size of the pickup area smaller, and changed the target object to pickup from a taped up piece of paper to an eraser. Both of these factors definitely made the pickup task easier. A smaller pickup space meant the arm did not have to extend as far, and the eraser was much bigger, grippier, and heavier than the paper, leading to a higher margin of error with the pickup. 
 I think these factors were not only making it difficult for the inferred policy to act, but also made it difficult for me as a demonstrator to provide good data. I could definitely be better at teleoperating the arm and do a smoother job with all the pickups, but because of the previously mentioned factors I think my data had some jerkier motion. It could just be confirmation bias but I get the sense that I will have a better policy if I provide demonstrations where each "macro-action" occurs smoothly and in one contiguous motion. 

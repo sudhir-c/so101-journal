@@ -1,4 +1,4 @@
-# 4 - Pick and Place
+# 04 - Pick and Place
 
 With the learnings from the previous entry, I trained a policy that could successfully pick and place. I kept the target box location constant this time, bumped up to 40 demonstrations, and trained for 100k steps.
 

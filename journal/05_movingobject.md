@@ -1,4 +1,4 @@
-# 5 - Pick and place with randomized object placement
+# 05 - Pick and place with randomized object placement
 
 Having successfully developed a policy that could reliably pick and place in two constant locations, I wanted to develop a more general policy that could adapt to the object being in a randomized location. I collected 40 demonstrations across an arbitrary ~10in x 8in workspace and trained for 100k steps on Colab's A100 — same setup as before, 9 hours of training. The results were suboptimal 💔.
 

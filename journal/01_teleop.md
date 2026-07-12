@@ -1,4 +1,4 @@
-# 1 - Teleop
+# 01 - Teleop
 
 With both arms assembled and motors set up, the next milestone was teleoperation — getting Spectre (the follower) to copy whatever I do to Phantom (the leader) in real time.
 

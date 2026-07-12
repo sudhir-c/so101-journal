@@ -1,6 +1,6 @@
-# 6 - Second attempt at pick and place with randomized object placement
+# 06 - Second attempt at pick and place with randomized object placement
 
-As described in the [previous entry](https://github.com/sudhir-c/so101-journal/blob/main/journal/5_movingobject.md), my first attempt at developing a policy that could adjust to a variable object pickup point was unsuccessful, and I suspected that it was because of the continuous way I moved the arm. 
+As described in the [previous entry](https://github.com/sudhir-c/so101-journal/blob/main/journal/05_movingobject.md), my first attempt at developing a policy that could adjust to a variable object pickup point was unsuccessful, and I suspected that it was because of the continuous way I moved the arm. 
 For this policy, I defined a clear pickup region with tape, so I could be visually sure that I was collecting data uniformly across my whole pickup region. 
 Most importantly, in each demonstration, I made the effort of explicitly splitting my demonstration up into 6 concrete steps. My hope was that being intentional with taking this steps would avoid the sort of continous motion that might make sense to me as a human but be hard to infer a policy from. 
 1) Move the arm to a central spot above the pickup region. 

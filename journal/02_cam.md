@@ -1,4 +1,4 @@
-# 2 - Camera Setup
+# 02 - Camera Setup
 
 Having confirmed the arms work, I had to set up my camera to get vision input for the policy.
 

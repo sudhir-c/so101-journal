@@ -1,4 +1,4 @@
-# 8 - Fourth attempt at pick and place with randomized object placement
+# 08 - Fourth attempt at pick and place with randomized object placement
 
 As described in the previous entry at this point I had discovered that there was a lot of wiggle room in the elbow joint. I did not document how much but it must have been +/- 5 degrees. After tightening this joint i decided to collect another set of data for a new policy.
 

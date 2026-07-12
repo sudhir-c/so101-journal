@@ -1,4 +1,4 @@
-# 3 - First Policy
+# 03 - First Policy
 
 I scrunched up a small teabag and tore the lid off one of the motor boxes to get my setup for a basic pick and place task. I just wanted to verify I could successfully train a policy end to end, so I kept things simple.
 

@@ -1,4 +1,4 @@
-# 0 - Intro
+# 00 - Intro
 This is the start of me documenting my progress with the [SO-101 robot arm](https://github.com/TheRobotStudio/SO-ARM100). hopefully this works 😛
 
 The SO-101 is a 6-DOF open source robot arm — 5 arm joints plus a gripper — all driven by [Feetech STS3215](https://www.feetechrc.com/STS3215.html) serial bus servos. These communicate over a half-duplex TTL serial bus, meaning all 6 motors share a single wire and take turns talking. I ordered the electronics-only kit from Partabot and had some friends at the University of Washington print the structural parts.

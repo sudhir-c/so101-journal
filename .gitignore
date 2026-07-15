@@ -1,6 +1,9 @@
 setup.txt
 outputs/
 teleop/mirror/mirror_calibration.json
+# Isolated placo IK venv (see teleop/robot/kinematics.py). Recreate with:
+#   uv venv --python 3.12 .venv-ik && uv pip install --python .venv-ik/bin/python --link-mode=copy placo
+.venv-ik/
 .claude/
 __pycache__/
 *.safetensors

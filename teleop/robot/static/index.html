@@ -25,12 +25,59 @@
   button#stop { background: #e74c3c; color: #fff; }
   button#stop.stopped { background: #f39c12; }
   button#sync { background: #34495e; color: #fff; flex: 0 0 auto; font-weight: 600; }
+
+  .modebar { display: flex; gap: .5rem; margin-bottom: 1rem; }
+  .modebar button { flex: 1; padding: .6rem; font-size: .95rem; background: #8883; color: inherit; }
+  .modebar button.active { background: #3498db; color: #fff; }
+  .modebar button:disabled { opacity: .4; cursor: not-allowed; }
+  .hidden { display: none; }
+  #ikpanel { border: 1px solid #3498db88; border-radius: 8px; padding: .8rem 1rem; margin: .5rem 0; }
+  .xyz { display: flex; gap: .5rem; margin: .5rem 0; }
+  .axis { flex: 1; display: flex; flex-direction: column; gap: .2rem; font-size: .8rem; opacity: .8; }
+  .nudge { display: flex; gap: .25rem; align-items: stretch; }
+  .nudge input { flex: 1; min-width: 0; padding: .4rem; font-variant-numeric: tabular-nums; font-size: 1rem; text-align: center; }
+  .nudge button { flex: 0 0 auto; width: 2rem; padding: .3rem 0; font-size: 1.15rem; font-weight: 700; background: #8883; color: inherit; border-radius: 6px; }
+  .badge { font-size: .78rem; font-weight: 700; padding: .15em .5em; border-radius: 4px; }
+  .badge.ok { background: #2ecc7133; color: #2ecc71; }
+  .badge.bad { background: #e74c3c; color: #fff; }
+  #resetorigin { background: #34495e; color: #fff; width: 100%; margin-top: .5rem; font-size: .9rem; padding: .6rem; }
 </style>
 
 <h1>SO-101 · spectre — manual joint control</h1>
 <div class="status">
   <span class="dot bad" id="conn-dot"></span>
   <span id="conn-text">connecting…</span>
+</div>
+
+<div class="modebar" id="modebar">
+  <button id="mode-slider" class="active">Sliders</button>
+  <button id="mode-ik">Position (IK)</button>
+</div>
+
+<div id="ikpanel" class="hidden">
+  <div class="row">
+    <span class="name">Tip target — mm, relative to origin</span>
+    <span class="badge" id="solvable-badge"></span>
+  </div>
+  <div class="xyz">
+    <div class="axis"><span>X · forward</span><div class="nudge">
+      <button type="button" data-axis="x" data-delta="-1">−</button>
+      <input type="number" id="pose-x" step="1" value="0">
+      <button type="button" data-axis="x" data-delta="1">+</button>
+    </div></div>
+    <div class="axis"><span>Y · left</span><div class="nudge">
+      <button type="button" data-axis="y" data-delta="-1">−</button>
+      <input type="number" id="pose-y" step="1" value="0">
+      <button type="button" data-axis="y" data-delta="1">+</button>
+    </div></div>
+    <div class="axis"><span>Z · up</span><div class="nudge">
+      <button type="button" data-axis="z" data-delta="-1">−</button>
+      <input type="number" id="pose-z" step="1" value="0">
+      <button type="button" data-axis="z" data-delta="1">+</button>
+    </div></div>
+  </div>
+  <div class="vals">actual tip <b id="tip-read">–</b> · wrist_roll &amp; gripper stay on their sliders below</div>
+  <button id="resetorigin">Reset origin to current tip</button>
 </div>
 
 <div id="joints"></div>
@@ -57,16 +104,40 @@ const SEND_HZ = 30;          // fixed command/poll cadence
 // tolerance). We keep commanding until settled, then go idle.
 const REACHED_TOL = 0.5;     // degrees / %
 
+// ── Position (IK) mode ──────────────────────────────────────────────────────
+let mode = "slider";                 // "slider" | "ik"
+let ikAvailable = false;
+let poseTarget = { x: 0, y: 0, z: 0 }; // mm, relative to origin (editable)
+let lastTip = null;                  // {x,y,z} actual tip from replies
+let solvable = true;
+const REACHED_TOL_MM = 2.0;
+const ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex"];  // solved by IK, hidden in IK mode
+const PASSTHROUGH = ["wrist_roll", "gripper"];  // kept on sliders in IK mode
+
 const el = (id) => document.getElementById(id);
 const unitFor = (name) => (name === GRIPPER ? "%" : "°");
 
 async function init() {
+  const health = await (await fetch("/health")).json().catch(() => ({}));
+  ikAvailable = !!health.ik_available;
+  if (!ikAvailable) {
+    el("mode-ik").disabled = true;
+    el("mode-ik").title = "IK unavailable (placo sidecar / URDF not loaded)";
+  }
   limits = await (await fetch("/limits")).json();
   const pos = await (await fetch("/positions")).json();
   buildUI(pos);
   // Safety: initialize every target to the arm's CURRENT position so the
   // stream holds still until a slider is moved — no jerk on startup.
   syncTargetsTo(pos);
+  for (const ax of ["x", "y", "z"]) {
+    el("pose-" + ax).addEventListener("input", () => {
+      poseTarget[ax] = parseFloat(el("pose-" + ax).value) || 0;
+    });
+  }
+  for (const btn of document.querySelectorAll("#ikpanel button[data-axis]")) {
+    btn.addEventListener("click", () => nudge(btn.dataset.axis, parseFloat(btn.dataset.delta)));
+  }
   connectWS();
   setInterval(tick, 1000 / SEND_HZ);   // fixed-cadence sender
 }
@@ -79,6 +150,7 @@ function buildUI(pos) {
     const unit = unitFor(name);
     const div = document.createElement("div");
     div.className = "joint";
+    div.id = "jointrow-" + name;
     div.innerHTML = `
       <div class="row">
         <span class="name">${name}</span>
@@ -129,6 +201,12 @@ function connectWS() {
     if (typeof data.stopped === "boolean" && data.stopped !== stopped) {
       setStopped(data.stopped);
     }
+    if (data.tip) {
+      lastTip = data.tip;
+      el("tip-read").textContent =
+        `${data.tip.x.toFixed(0)}, ${data.tip.y.toFixed(0)}, ${data.tip.z.toFixed(0)} mm`;
+    }
+    if (typeof data.solvable === "boolean") { solvable = data.solvable; updateSolvableBadge(); }
     applyPositions(data.positions);
   };
 
@@ -147,19 +225,40 @@ function isActive() {
   return false;
 }
 
+// IK-mode "active": tip target differs from actual, or a passthrough
+// (wrist_roll / gripper) slider is being moved.
+function isActiveIK() {
+  if (lastTip) {
+    for (const ax of ["x", "y", "z"]) {
+      if (Math.abs(poseTarget[ax] - lastTip[ax]) > REACHED_TOL_MM) return true;
+    }
+  }
+  for (const name of PASSTHROUGH) {
+    if (dragging.has(name)) return true;
+    const tgt = targets[name], act = lastPos[name];
+    if (tgt != null && act != null && Math.abs(tgt - act) > REACHED_TOL) return true;
+  }
+  return false;
+}
+
 // Fixed-cadence sender. Runs for the life of the page from a setInterval, so a
 // foreground tab commands reliably (unlike a self-clocked send→reply loop, which
 // Chrome throttles). `inFlight` paces us to the serial bus and prevents pile-up.
+// When idle (or stopped) we send an empty frame: the server still replies with
+// positions (and tip) for the live readout, but commands NO motion.
 function tick() {
   if (!ws || ws.readyState !== WebSocket.OPEN || inFlight) return;
-  // Only send motion commands while actively moving. When idle (or stopped) we
-  // send an empty frame: the server still replies with positions for the live
-  // readout, but commands NO motion. This is the key safety property — the arm
-  // holds position via its own motor torque and never moves on its own.
-  const commanding = isActive() && !stopped;
   inFlight = true;
   try {
-    ws.send(JSON.stringify({ angles: commanding ? targets : {} }));
+    if (mode === "ik") {
+      const commanding = isActiveIK() && !stopped;
+      ws.send(JSON.stringify(commanding
+        ? { pose: poseTarget, angles: { wrist_roll: targets.wrist_roll, gripper: targets.gripper } }
+        : {}));
+    } else {
+      const commanding = isActive() && !stopped;
+      ws.send(JSON.stringify({ angles: commanding ? targets : {} }));
+    }
   } catch (e) {
     inFlight = false;
   }
@@ -171,7 +270,7 @@ function applyPositions(pos) {
   // stale slider value. Do it here, where we have fresh positions in hand.
   if (resyncPending) { syncTargetsTo(pos); resyncPending = false; }
   // Evaluate once, before mutating targets below.
-  const idle = !isActive();
+  const idle = mode === "ik" ? !isActiveIK() : !isActive();
   for (const name of Object.keys(limits)) {
     el("act-" + name).textContent = pos[name].toFixed(1);
     el("tgt-" + name).textContent = (targets[name] ?? pos[name]).toFixed(1);
@@ -212,7 +311,58 @@ el("stop").addEventListener("click", () => {
   setStopped(next);
 });
 
-el("sync").addEventListener("click", () => { resyncPending = true; });
+// ── Mode switching ──────────────────────────────────────────────────────────
+function updatePoseInputs() {
+  for (const ax of ["x", "y", "z"]) el("pose-" + ax).value = poseTarget[ax].toFixed(0);
+}
+
+// Bump a tip-target axis by delta mm (the −/+ buttons).
+function nudge(axis, delta) {
+  poseTarget[axis] = (poseTarget[axis] || 0) + delta;
+  el("pose-" + axis).value = poseTarget[axis].toFixed(0);
+}
+
+function updateSolvableBadge() {
+  const b = el("solvable-badge");
+  if (mode !== "ik") { b.textContent = ""; b.className = "badge"; return; }
+  b.textContent = solvable ? "reachable" : "UNREACHABLE — holding";
+  b.className = "badge " + (solvable ? "ok" : "bad");
+}
+
+function setMode(m) {
+  if (m === "ik" && !ikAvailable) return;
+  mode = m;
+  el("mode-slider").classList.toggle("active", m === "slider");
+  el("mode-ik").classList.toggle("active", m === "ik");
+  el("ikpanel").classList.toggle("hidden", m !== "ik");
+  // In IK mode the 4 arm joints are solved (hide their sliders); wrist_roll +
+  // gripper stay on their sliders.
+  for (const name of ARM_JOINTS) el("jointrow-" + name).classList.toggle("hidden", m === "ik");
+  if (m === "ik") {
+    // No lunge: aim at the current tip so nothing moves until you edit X/Y/Z.
+    if (lastTip) { poseTarget = { ...lastTip }; updatePoseInputs(); }
+    updateSolvableBadge();
+  } else {
+    resyncPending = true;   // slider targets snap to the arm's actual pose
+    updateSolvableBadge();
+  }
+}
+el("mode-slider").addEventListener("click", () => setMode("slider"));
+el("mode-ik").addEventListener("click", () => setMode("ik"));
+
+el("resetorigin").addEventListener("click", async () => {
+  await fetch("/ik/reset_origin", { method: "POST" }).catch(() => {});
+  poseTarget = { x: 0, y: 0, z: 0 };   // origin is now the current tip → target 0
+  updatePoseInputs();
+});
+
+el("sync").addEventListener("click", () => {
+  if (mode === "ik") {
+    if (lastTip) { poseTarget = { ...lastTip }; updatePoseInputs(); }  // aim at actual tip
+  } else {
+    resyncPending = true;
+  }
+});
 
 // When the tab regains visibility/focus (e.g. you open DevTools or switch back),
 // re-sync targets to the arm's actual pose before the loop resumes, so a tab

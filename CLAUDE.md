@@ -185,3 +185,20 @@ See `teleop/robot/README.md`. Key hazards repeated here because they bite hard:
   mirror's go-limp STOP uses the **additive** `disable_torque()`/`enable_torque()`;
   don't change `stop()` semantics to add torque-off — keep it additive.
 - Ports: robot UI **8000**, vision **8080**, mirror **8090**.
+
+### Position (IK) mode + the `.venv-ik` sidecar
+
+The slider dashboard also has a **Position (IK)** mode (X/Y/Z tip target → 4 arm
+joints; wrist_roll + gripper stay manual). It reuses `step()` for all motion, so
+clamp/velocity-limit/STOP apply; unsolvable → arm holds. See `teleop/robot/README.md`.
+
+- **placo (the IK lib) is NOT in the main `.venv`** — it needs numpy 2.3.5, which
+  would break torch/LeRobot. So IK runs as a **subprocess in a separate `.venv-ik`**
+  (`teleop/robot/kinematics.py` spawns `teleop/robot/ik_service.py`). `.venv-ik` is
+  gitignored; recreate with `uv venv --python 3.12 .venv-ik && uv pip install
+  --python .venv-ik/bin/python --link-mode=copy placo` (copy mode matters — uv's
+  shared cache otherwise gets pruned out from under it).
+- `ik_service.py` self-activates cmeel's `placo.so` prefix (its `.pth` is flaky) and
+  imports only numpy+placo (no lerobot), so it loads in the minimal venv.
+- IK is additive: if `.venv-ik`/URDF are missing the dashboard runs slider-only and
+  the IK toggle is disabled (`/health` → `ik_available: false`).

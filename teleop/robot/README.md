@@ -50,19 +50,47 @@ while it is running.
 | POST | `/joints` | Command many — body `{"angles": {joint: float}}` |
 | POST | `/stop` | Reject motion commands (arm holds position) |
 | POST | `/resume` | Allow motion commands again |
+| POST | `/ik/reset_origin` | Set the IK origin (0,0,0) to the current tip |
 
 ### `/ws` protocol
 
 Client sends, one message per update:
 ```json
-{"angles": {"wrist_roll": 12.3, "elbow_flex": -5.0}}
+{"angles": {"wrist_roll": 12.3, "elbow_flex": -5.0}}       // slider mode: joints
+{"pose": {"x": 30, "y": 0, "z": -20}, "angles": {...}}      // IK mode: tip (mm)
 {"cmd": "stop"}    {"cmd": "resume"}
 ```
-Server replies to each with `{"positions": {joint: float}, "stopped": bool}`.
+Server replies with `{"positions": {joint: float}, "stopped": bool}`, plus
+`"tip": {x,y,z}` (+ `"solvable": bool` for pose frames) when IK is available.
 
 The UI streams continuously (send → await reply → send), so the command rate
 self-paces to whatever the serial bus sustains — no fixed poll rate. On
 disconnect the arm simply stops receiving commands and holds position.
+
+## Position (IK) mode
+
+The UI toggles between **Sliders** and **Position (IK)**. In IK mode you set an
+**X/Y/Z target for the end-effector tip** (mm, relative to an origin that
+defaults to the tip at startup and is resettable) and the arm solves its way
+there. IK drives the 4 arm joints (`shoulder_pan, shoulder_lift, elbow_flex,
+wrist_flex`); `wrist_roll` + `gripper` stay on their sliders. Unreachable
+targets → the arm holds (badge shows "UNREACHABLE"). Every solution still goes
+through `RobotController.step()` (clamp + velocity-limit + STOP).
+
+**The solver runs in a separate venv.** placo (the IK library) can't be
+installed into the main venv without bumping numpy and disturbing torch/LeRobot,
+so `teleop/robot/kinematics.py` spawns `teleop/robot/ik_service.py` as a
+subprocess in an isolated **`.venv-ik`**. If that venv or the URDF is missing,
+the dashboard runs slider-only (the IK toggle is disabled). Recreate the venv:
+
+```bash
+uv venv --python 3.12 .venv-ik
+uv pip install --python .venv-ik/bin/python --link-mode=copy placo
+```
+
+Kinematics come from the SO-ARM100 URDF (`urdf/so101_new_calib.urdf`, meshes
+stripped into `urdf/so101_kinematics.urdf`); tip frame `gripper_frame_link`.
+Verify offline (no motors): `.venv-ik/bin/python teleop/robot/scripts/verify_ik.py`.
 
 ## Safety limits
 

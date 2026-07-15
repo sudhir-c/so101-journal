@@ -15,6 +15,7 @@ Run (from the repo root):  .venv/bin/python -m teleop.robot.server
 """
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,6 +26,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .control import JOINT_LIMITS, JOINT_NAMES, RobotController
+from .kinematics import PASSTHROUGH_JOINTS, TIP_FRAME, ArmIKClient
+
+logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 
@@ -37,12 +41,84 @@ ROBOT_ID = "spectre"
 controller = RobotController(port=PORT, robot_id=ROBOT_ID)
 
 
+# ── Inverse kinematics (position mode) ──────────────────────────────────────────
+# Additive: if the IK sidecar/URDF can't load, `client` stays None and the
+# dashboard runs slider-only. The origin is the tip position (mm) at startup.
+
+class IKState:
+    def __init__(self):
+        self.client: ArmIKClient | None = None
+        self.origin_mm: list[float] | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def available(self) -> bool:
+        return self.client is not None
+
+    def build(self) -> None:
+        client = ArmIKClient()
+        self.origin_mm = client.fk_tip_mm(controller.get_positions())
+        self.client = client  # set last so `available` flips only when fully ready
+
+    def close(self) -> None:
+        if self.client is not None:
+            self.client.close()
+
+    def set_origin(self, q: dict) -> None:
+        with self._lock:
+            self.origin_mm = self.client.fk_tip_mm(q)
+
+    def tip_rel(self, q: dict) -> list[float]:
+        """Tip position relative to the origin (mm), for a full joint dict."""
+        with self._lock:
+            origin = self.origin_mm
+        tip = self.client.fk_tip_mm(q)
+        return [tip[i] - origin[i] for i in range(3)]
+
+
+ik_state = IKState()
+
+
+def ik_step(pose: dict, passthrough: dict) -> dict:
+    """Blocking pose→motion step (runs in a threadpool). Solve the arm for the
+    tip target, command it through the safety core, and report the resulting
+    tip + solvability. On unsolvable, the arm holds (only wrist_roll/gripper
+    passthrough still applies)."""
+    q = controller.get_positions()
+    with ik_state._lock:
+        origin = ik_state.origin_mm
+    target_abs = [origin[i] + float(pose[k]) for i, k in enumerate(("x", "y", "z"))]
+    # Freeze the IK at the arm's current wrist_roll (roll barely affects the tip).
+    sol, solvable, _err = ik_state.client.solve(q, target_abs, q["wrist_roll"])
+    passthrough = {k: v for k, v in passthrough.items() if k in PASSTHROUGH_JOINTS}
+    targets = {**sol, **passthrough} if solvable else dict(passthrough)
+    positions = controller.step(targets)
+    tip = ik_state.client.fk_tip_mm(positions)
+    return {
+        "positions": positions,
+        "tip": {"x": tip[0] - origin[0], "y": tip[1] - origin[1], "z": tip[2] - origin[2]},
+        "solvable": solvable,
+    }
+
+
+def tip_dict(positions: dict) -> dict:
+    """Tip position relative to origin as {x,y,z} (for slider-mode replies)."""
+    t = ik_state.tip_rel(positions)
+    return {"x": t[0], "y": t[1], "z": t[2]}
+
+
 # ── App lifecycle ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     controller.connect()
+    try:
+        ik_state.build()
+        logger.info("IK ready (tip frame %s, origin_mm=%s)", TIP_FRAME, ik_state.origin_mm)
+    except Exception as e:  # noqa: BLE001 - IK is optional; degrade to slider-only
+        logger.warning("IK unavailable — running slider-only mode: %s", e)
     yield
+    ik_state.close()
     controller.disconnect()
 
 
@@ -60,7 +136,13 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    return {"ok": True, "connected": controller.is_connected, "stopped": controller.is_stopped}
+    return {
+        "ok": True,
+        "connected": controller.is_connected,
+        "stopped": controller.is_stopped,
+        "ik_available": ik_state.available,
+        "tip_frame": TIP_FRAME,
+    }
 
 
 @app.get("/positions")
@@ -141,16 +223,17 @@ async def ws(websocket: WebSocket):
     estimator use this).
 
     Protocol — client sends JSON messages, one per desired update:
-        {"angles": {"wrist_roll": 12.3, ...}}   # command toward these targets
-        {"cmd": "stop"} / {"cmd": "resume"}      # safety controls
+        {"angles": {"wrist_roll": 12.3, ...}}    # slider mode: joint targets
+        {"pose": {"x","y","z"}, "angles": {...}}  # IK mode: tip target (mm, rel
+                                                  #   to origin) + roll/gripper
+        {"cmd": "stop"} / {"cmd": "resume"}       # safety controls
 
     Server replies to every message with:
-        {"positions": {joint: float, ...}, "stopped": bool}
+        {"positions": {joint: float}, "stopped": bool,
+         "tip"?: {x,y,z}, "solvable"?: bool}      # tip/solvable in IK mode
 
-    The client streams continuously (send → await reply → send again), so the
-    effective rate self-paces to whatever the serial bus sustains. The blocking
-    serial step() runs in a threadpool and shares RobotController's lock with
-    the REST endpoints, so concurrent access stays safe.
+    The blocking serial step() (and the IK solve) run in a threadpool and share
+    RobotController's lock with the REST endpoints, so concurrent access is safe.
     """
     await websocket.accept()
     try:
@@ -161,15 +244,24 @@ async def ws(websocket: WebSocket):
                 controller.stop()
             elif cmd == "resume":
                 controller.resume()
-            # step() ignores targets internally while stopped, and always
-            # returns fresh positions for the display.
+            pose = msg.get("pose")
             angles = msg.get("angles", {})
             try:
-                positions = await run_in_threadpool(controller.step, angles)
+                if pose is not None and ik_state.available:
+                    # IK mode: solve the arm for the tip target, hold on unsolvable.
+                    reply = await run_in_threadpool(ik_step, pose, angles)
+                    reply["stopped"] = controller.is_stopped
+                else:
+                    # Slider mode (or IK idle empty frames): step() ignores
+                    # targets while stopped, always returns fresh positions.
+                    positions = await run_in_threadpool(controller.step, angles)
+                    reply = {"positions": positions, "stopped": controller.is_stopped}
+                    if ik_state.available:
+                        reply["tip"] = await run_in_threadpool(tip_dict, positions)
             except (ValueError, RuntimeError) as e:
                 await websocket.send_json({"error": str(e)})
                 continue
-            await websocket.send_json({"positions": positions, "stopped": controller.is_stopped})
+            await websocket.send_json(reply)
     except WebSocketDisconnect:
         # Client vanished — the arm simply stops receiving commands and holds
         # its last position. No torque change, no lunge.
@@ -186,6 +278,18 @@ def stop():
 def resume():
     controller.resume()
     return {"ok": True, "stopped": False}
+
+
+@app.post("/ik/reset_origin")
+def reset_origin():
+    """Set the IK origin (0,0,0) to the arm's current tip position."""
+    if not ik_state.available:
+        raise HTTPException(status_code=503, detail="IK unavailable")
+    try:
+        ik_state.set_origin(controller.get_positions())
+        return {"ok": True, "origin_mm": ik_state.origin_mm}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 # ── Static frontend ────────────────────────────────────────────────────────────

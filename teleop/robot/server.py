@@ -211,9 +211,18 @@ async def lifespan(app: FastAPI):
         logger.warning("IK unavailable — running slider-only mode: %s", e)
     camera_feed.start()
     yield
-    camera_feed.stop()
-    ik_state.close()
-    controller.disconnect()
+    # Release the arm FIRST and unconditionally — cutting torque on shutdown must
+    # never be blocked by camera / IK-sidecar cleanup errors. disconnect() honors
+    # disable_torque_on_disconnect=True, so the arm goes limp here.
+    try:
+        controller.disconnect()
+    except Exception:
+        logger.exception("robot disconnect failed")
+    for label, cleanup in (("camera", camera_feed.stop), ("IK sidecar", ik_state.close)):
+        try:
+            cleanup()
+        except Exception:
+            logger.exception("%s shutdown failed", label)
 
 
 app = FastAPI(title="SO-101 arm controller", lifespan=lifespan)
@@ -234,6 +243,7 @@ def health():
         "ok": True,
         "connected": controller.is_connected,
         "stopped": controller.is_stopped,
+        "torque": controller.is_torque_enabled,
         "ik_available": ik_state.available,
         "tip_frame": TIP_FRAME,
     }
@@ -355,6 +365,7 @@ async def ws(websocket: WebSocket):
             except (ValueError, RuntimeError) as e:
                 await websocket.send_json({"error": str(e)})
                 continue
+            reply["torque"] = controller.is_torque_enabled
             await websocket.send_json(reply)
     except WebSocketDisconnect:
         # Client vanished — the arm simply stops receiving commands and holds
@@ -372,6 +383,26 @@ def stop():
 def resume():
     controller.resume()
     return {"ok": True, "stopped": False}
+
+
+@app.post("/release")
+def release():
+    """Cut torque — the arm goes limp and can be moved by hand."""
+    try:
+        controller.disable_torque()
+        return {"ok": True, "torque": controller.is_torque_enabled}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/hold")
+def hold():
+    """Re-enable torque, holding the arm's current (possibly hand-moved) pose."""
+    try:
+        controller.enable_torque()
+        return {"ok": True, "torque": controller.is_torque_enabled}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.post("/ik/reset_origin")

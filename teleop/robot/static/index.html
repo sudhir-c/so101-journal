@@ -24,6 +24,8 @@
   }
   button#stop { background: #e74c3c; color: #fff; }
   button#stop.stopped { background: #f39c12; }
+  button#release { background: #f39c12; color: #111; flex: 0 0 auto; font-weight: 600; }
+  button#release.released { background: #16a085; color: #fff; }
   button#sync { background: #34495e; color: #fff; flex: 0 0 auto; font-weight: 600; }
 
   .modebar { display: flex; gap: .5rem; margin-bottom: 1rem; }
@@ -105,6 +107,7 @@
 
 <div class="toolbar">
   <button id="stop">STOP</button>
+  <button id="release" title="Cut torque — the arm goes limp (support it first)">Release · go limp</button>
   <button id="sync" title="Snap all sliders to the arm's current pose">Re-sync</button>
 </div>
 
@@ -116,6 +119,7 @@ let targets = {};            // desired angle per joint
 let lastPos = {};            // most recent actual positions from the arm
 let dragging = new Set();    // joints the user is currently holding
 let stopped = false;
+let torqueOn = true;         // false = arm released (limp)
 let ws = null;
 let inFlight = false;        // a frame has been sent and we're awaiting its reply
 let resyncPending = false;   // snap targets to actual on next frame (after resume / re-sync)
@@ -145,6 +149,8 @@ async function init() {
     el("mode-ik").disabled = true;
     el("mode-ik").title = "IK unavailable (placo sidecar / URDF not loaded)";
   }
+  torqueOn = health.torque !== false;
+  updateReleaseBtn();
   limits = await (await fetch("/limits")).json();
   const pos = await (await fetch("/positions")).json();
   buildUI(pos);
@@ -223,6 +229,9 @@ function connectWS() {
     if (typeof data.stopped === "boolean" && data.stopped !== stopped) {
       setStopped(data.stopped);
     }
+    if (typeof data.torque === "boolean" && data.torque !== torqueOn) {
+      torqueOn = data.torque; updateReleaseBtn();
+    }
     if (data.tip) {
       lastTip = data.tip;
       el("tip-read").textContent =
@@ -273,12 +282,12 @@ function tick() {
   inFlight = true;
   try {
     if (mode === "ik") {
-      const commanding = isActiveIK() && !stopped;
+      const commanding = isActiveIK() && !stopped && torqueOn;
       ws.send(JSON.stringify(commanding
         ? { pose: poseTarget, angles: { wrist_roll: targets.wrist_roll, gripper: targets.gripper } }
         : {}));
     } else {
-      const commanding = isActive() && !stopped;
+      const commanding = isActive() && !stopped && torqueOn;
       ws.send(JSON.stringify({ angles: commanding ? targets : {} }));
     }
   } catch (e) {
@@ -384,6 +393,25 @@ el("sync").addEventListener("click", () => {
   } else {
     resyncPending = true;
   }
+});
+
+// Release cuts torque (arm goes limp); Hold re-enables it, holding wherever the
+// arm currently is. The button reflects the server's authoritative torque state.
+function updateReleaseBtn() {
+  el("release").textContent = torqueOn ? "Release · go limp" : "Hold · re-enable";
+  el("release").classList.toggle("released", !torqueOn);
+}
+el("release").addEventListener("click", () => {
+  if (torqueOn) {
+    fetch("/release", { method: "POST" }).catch(() => {});
+  } else {
+    // Re-holding: snap targets to the arm's actual (hand-moved) pose so it
+    // doesn't lunge to a stale target once torque is back.
+    resyncPending = true;
+    if (mode === "ik" && lastTip) { poseTarget = { ...lastTip }; updatePoseInputs(); }
+    fetch("/hold", { method: "POST" }).catch(() => {});
+  }
+  // torqueOn updates from the next WS reply (authoritative).
 });
 
 // ── Robot camera feed (optional; off by default) ────────────────────────────

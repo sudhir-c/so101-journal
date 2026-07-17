@@ -33,14 +33,27 @@
   .hidden { display: none; }
   #ikpanel { border: 1px solid #3498db88; border-radius: 8px; padding: .8rem 1rem; margin: .5rem 0; }
   .xyz { display: flex; gap: .5rem; margin: .5rem 0; }
-  .axis { flex: 1; display: flex; flex-direction: column; gap: .2rem; font-size: .8rem; opacity: .8; }
+  .axis { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: .2rem; font-size: .8rem; opacity: .8; }
   .nudge { display: flex; gap: .25rem; align-items: stretch; }
-  .nudge input { flex: 1; min-width: 0; padding: .4rem; font-variant-numeric: tabular-nums; font-size: 1rem; text-align: center; }
-  .nudge button { flex: 0 0 auto; width: 2rem; padding: .3rem 0; font-size: 1.15rem; font-weight: 700; background: #8883; color: inherit; border-radius: 6px; }
+  .nudge input {
+    flex: 1 1 0; min-width: 0; box-sizing: border-box;
+    padding: .4rem .2rem; font-variant-numeric: tabular-nums; font-size: 1rem; text-align: center;
+    -moz-appearance: textfield; appearance: textfield;   /* hide native spinners; we have -/+ */
+  }
+  .nudge input::-webkit-outer-spin-button,
+  .nudge input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .nudge button {
+    flex: 0 0 1.8rem; box-sizing: border-box; padding: .3rem 0;
+    font-size: 1.1rem; font-weight: 700; background: #8883; color: inherit; border-radius: 6px;
+  }
   .badge { font-size: .78rem; font-weight: 700; padding: .15em .5em; border-radius: 4px; }
   .badge.ok { background: #2ecc7133; color: #2ecc71; }
   .badge.bad { background: #e74c3c; color: #fff; }
   #resetorigin { background: #34495e; color: #fff; width: 100%; margin-top: .5rem; font-size: .9rem; padding: .6rem; }
+  #camerapanel { border: 1px solid #8884; border-radius: 8px; padding: .6rem 1rem; margin: .5rem 0; }
+  #camerapanel .row { align-items: center; }
+  #cam { font-size: .9rem; padding: .3rem; }
+  #feed { width: 100%; border-radius: 8px; margin-top: .5rem; background: #0003; display: none; }
 </style>
 
 <h1>SO-101 · spectre — manual joint control</h1>
@@ -52,6 +65,14 @@
 <div class="modebar" id="modebar">
   <button id="mode-slider" class="active">Sliders</button>
   <button id="mode-ik">Position (IK)</button>
+</div>
+
+<div id="camerapanel">
+  <div class="row">
+    <span class="name">Robot camera</span>
+    <select id="cam"></select>
+  </div>
+  <img id="feed" src="/video" alt="robot camera">
 </div>
 
 <div id="ikpanel" class="hidden">
@@ -138,6 +159,7 @@ async function init() {
   for (const btn of document.querySelectorAll("#ikpanel button[data-axis]")) {
     btn.addEventListener("click", () => nudge(btn.dataset.axis, parseFloat(btn.dataset.delta)));
   }
+  loadCameras();
   connectWS();
   setInterval(tick, 1000 / SEND_HZ);   // fixed-cadence sender
 }
@@ -362,6 +384,34 @@ el("sync").addEventListener("click", () => {
   } else {
     resyncPending = true;
   }
+});
+
+// ── Robot camera feed (optional; off by default) ────────────────────────────
+async function loadCameras() {
+  try {
+    const c = await (await fetch("/api/cameras")).json();
+    const sel = el("cam");
+    sel.innerHTML = "";
+    const off = document.createElement("option");
+    off.value = -1; off.textContent = "off";
+    if (c.current == null) off.selected = true;
+    sel.appendChild(off);
+    for (const i of c.indices) {
+      const o = document.createElement("option");
+      o.value = i; o.textContent = "Camera " + i;
+      if (i === c.current) o.selected = true;
+      sel.appendChild(o);
+    }
+    el("feed").style.display = (c.current == null) ? "none" : "block";
+  } catch (e) { /* camera endpoint unavailable — leave off */ }
+}
+el("cam").addEventListener("change", async () => {
+  const v = parseInt(el("cam").value, 10);
+  el("feed").style.display = (v < 0) ? "none" : "block";
+  await fetch("/api/camera", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ index: v }),
+  }).catch(() => {});
 });
 
 // When the tab regains visibility/focus (e.g. you open DevTools or switch back),

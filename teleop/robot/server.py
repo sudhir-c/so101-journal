@@ -16,17 +16,20 @@ Run (from the repo root):  .venv/bin/python -m teleop.robot.server
 
 import logging
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import cv2
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .control import JOINT_LIMITS, JOINT_NAMES, RobotController
 from .kinematics import PASSTHROUGH_JOINTS, TIP_FRAME, ArmIKClient
+from ..vision.camera import Camera, macos_camera_names
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +110,95 @@ def tip_dict(positions: dict) -> dict:
     return {"x": t[0], "y": t[1], "z": t[2]}
 
 
+# ── Optional robot-facing camera feed ───────────────────────────────────────────
+# A passthrough webcam (point it at the arm) so you can watch the robot while
+# driving it. Off by default, switchable live from the UI; independent of the
+# serial port. Reuses teleop.vision.camera.Camera for capture.
+
+class CameraFeed:
+    def __init__(self, width=1280, height=720, fps=30, jpeg_quality=80):
+        self.width, self.height, self.fps, self.jpeg_quality = width, height, fps, jpeg_quality
+        self._lock = threading.Lock()
+        self._jpeg: bytes | None = None
+        self._event = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._index: int | None = None      # None = off
+        self._desired: int | None = None
+        self._dirty = False
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="camera", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+
+    def switch(self, index: int | None) -> None:
+        with self._lock:
+            self._desired = index
+            self._dirty = True
+
+    def current(self) -> int | None:
+        with self._lock:
+            return self._index
+
+    def _run(self) -> None:
+        camera: Camera | None = None
+        current: int | None = None
+        encode = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
+        while not self._stop.is_set():
+            with self._lock:
+                dirty, desired = self._dirty, self._desired
+                self._dirty = False
+            if dirty and desired != current:
+                if camera is not None:
+                    camera.release()
+                    camera = None
+                current = desired
+                with self._lock:
+                    self._index = current
+                if desired is not None:
+                    try:  # not a selfie view — no mirror flip
+                        camera = Camera(index=desired, width=self.width, height=self.height,
+                                        fps=self.fps, mirror=False)
+                    except RuntimeError as exc:
+                        logger.warning("camera %s failed to open: %s", desired, exc)
+                        camera = None
+            if camera is None:
+                time.sleep(0.1)
+                continue
+            frame = camera.read()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+            ok, buf = cv2.imencode(".jpg", frame, encode)
+            if ok:
+                with self._lock:
+                    self._jpeg = buf.tobytes()
+                self._event.set()
+        if camera is not None:
+            camera.release()
+
+    def mjpeg(self):
+        boundary = b"--frame\r\n"
+        while not self._stop.is_set():
+            self._event.wait(timeout=1.0)
+            self._event.clear()
+            with self._lock:
+                jpeg = self._jpeg
+            if jpeg is None:
+                continue
+            yield boundary + b"Content-Type: image/jpeg\r\n"
+            yield f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
+            yield jpeg + b"\r\n"
+
+
+camera_feed = CameraFeed()
+
+
 # ── App lifecycle ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -117,7 +209,9 @@ async def lifespan(app: FastAPI):
         logger.info("IK ready (tip frame %s, origin_mm=%s)", TIP_FRAME, ik_state.origin_mm)
     except Exception as e:  # noqa: BLE001 - IK is optional; degrade to slider-only
         logger.warning("IK unavailable — running slider-only mode: %s", e)
+    camera_feed.start()
     yield
+    camera_feed.stop()
     ik_state.close()
     controller.disconnect()
 
@@ -290,6 +384,36 @@ def reset_origin():
         return {"ok": True, "origin_mm": ik_state.origin_mm}
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+
+# ── Robot camera feed ───────────────────────────────────────────────────────────
+
+class CameraReq(BaseModel):
+    index: int   # negative = off
+
+
+@app.get("/video")
+def video():
+    return StreamingResponse(
+        camera_feed.mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+@app.get("/api/cameras")
+def cameras():
+    # Indices are the reliable handle; device names are an unordered hint
+    # (macOS doesn't map names→indices). Pick the index that shows the arm.
+    return {
+        "indices": list(range(5)),
+        "names": macos_camera_names(),
+        "current": camera_feed.current(),
+    }
+
+
+@app.post("/api/camera")
+def set_camera(req: CameraReq):
+    camera_feed.switch(None if req.index < 0 else req.index)
+    return {"ok": True, "index": req.index}
 
 
 # ── Static frontend ────────────────────────────────────────────────────────────

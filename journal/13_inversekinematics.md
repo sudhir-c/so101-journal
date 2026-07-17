@@ -1,4 +1,4 @@
-# 13 - Inverse kinematics (ENTRY NOT YET COMPLETE)
+# 13 - Inverse kinematics
 
 I wanted to get inverse kinematics to work on the arm as well. I wanted to be able to specify an (x, y, z) position for the tip of the gripper to be at and calculate the joint angles to move there. This is the reverse of forward kinematics, where you already know every joint angle and just chain the link transforms down the arm to find where the tip lands. Forward kinematics has one clean answer; inverse kinematics is the harder direction, since a given target position has no tidy closed-form solution on an arm shaped like this one and generally has to be solved numerically.
 
@@ -12,4 +12,8 @@ LeRobot defines its own solver, based on the [Placo](https://placo.readthedocs.i
 
 The logic I did copy over is the core Placo setup: load the URDF, fix the base of the robot in place, put a position-only task on the gripper tip frame so the solver only cares where the tip ends up and not which way the wrist is turned, seed it with the arm's current joint angles, and then iterate the solver until the tip converges onto the target. Everything is handled in degrees on the outside to match the rest of the control stack and converted to radians for Placo internally. Because the solve runs on every update at around thirty times a second and each one only takes about a millisecond, it comfortably keeps up with live dragging of the target, and the velocity limit in the control layer smooths out any larger jumps in the solution.
 
-<!-- video demonstration goes here -->
+
+
+https://github.com/user-attachments/assets/4c8d780c-99e2-4620-b25b-a80e24e1a9f1
+
+

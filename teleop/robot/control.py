@@ -236,6 +236,30 @@ class RobotController:
         return self._torque_enabled
 
     # ------------------------------------------------------------------
+    # Telemetry (additive, read-only)
+    # ------------------------------------------------------------------
+
+    def read_telemetry(
+        self,
+        registers: tuple[str, ...] = ("Present_Current", "Present_Load", "Present_Temperature"),
+    ) -> dict[str, dict[str, float]]:
+        """Read read-only per-motor telemetry (current / load / temperature, etc.)
+        for logging and reward side-channels — e.g. an RL env's `info` dict.
+
+        Goes through the same bus and lock as the motion path, so serial access
+        stays ordered. Returns {register: {joint: raw_value}}; a register that
+        can't be read comes back as an empty dict rather than raising."""
+        with self._lock:
+            self._require_connected()
+            out: dict[str, dict[str, float]] = {}
+            for reg in registers:
+                try:
+                    out[reg] = self._robot.bus.sync_read(reg, normalize=False)
+                except Exception:  # noqa: BLE001 - telemetry is best-effort
+                    out[reg] = {}
+            return out
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

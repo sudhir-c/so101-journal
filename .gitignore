@@ -8,6 +8,9 @@ teleop/mirror/mirror_calibration.json
 __pycache__/
 *.safetensors
 
+# RL training checkpoints (SAC models + replay buffers) — large binaries.
+teleop/rl_reach/checkpoints/
+
 # MediaPipe Tasks model bundles: 22MB of binaries, reproducible via
 # teleop/scripts/download_models.sh. Fetch them, don't commit them.
 teleop/models/*.task

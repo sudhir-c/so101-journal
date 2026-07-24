@@ -1,0 +1,18 @@
+[package]
+name = "sts3215"
+version = "0.1.0"
+description = "Driver for Feetech STS3215 smart serial servos"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# `serial` gates the ONLY code path that can open a real port. Building with
+# `--no-default-features` makes it structurally impossible to touch hardware,
+# which is how the offline test suite is run.
+default = ["serial"]
+serial = ["dep:serialport"]
+
+[dependencies]
+thiserror.workspace = true
+serialport = { workspace = true, optional = true }

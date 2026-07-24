@@ -1,5 +1,7 @@
 # so101-journal
 
+https://github.com/user-attachments/assets/48a9cb43-b508-4f25-87ad-baa328d1d13c
+
 Personal journal **and** working code for my [SO-101 robot arm](https://github.com/TheRobotStudio/SO-ARM100)
 — a 5-DOF + gripper follower arm (nicknamed `spectre`). The repo has two halves:
 

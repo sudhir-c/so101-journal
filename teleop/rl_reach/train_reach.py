@@ -49,6 +49,10 @@ def main() -> None:
     ap.add_argument("--prefix", default="reach_sac")
     ap.add_argument("--device", default="mps")
     ap.add_argument("--fresh", action="store_true", help="ignore existing checkpoints")
+    ap.add_argument("--fresh-buffer", action="store_true",
+                    help="warm-start the policy weights from the latest checkpoint but "
+                         "start a NEW replay buffer (use after changing the reward/action "
+                         "scale, which makes the old buffer's rewards/dynamics stale)")
     args = ap.parse_args()
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
@@ -65,10 +69,16 @@ def main() -> None:
         if ckpt:
             print(f"Resuming from {ckpt}")
             model = SAC.load(ckpt, env=env, device=args.device)
-            if rb:
+            if rb and not args.fresh_buffer:
                 model.load_replay_buffer(rb)
                 print(f"Loaded replay buffer {rb}")
-            reset_num_timesteps = False
+                reset_num_timesteps = False
+            else:
+                # Warm-start the learned policy/critic weights but collect a fresh buffer
+                # (a re-warmup of learning_starts steps) so stale rewards/dynamics from
+                # before a retune don't poison the critic. Step counter resets.
+                print("Fresh replay buffer — warm-starting policy weights only")
+                reset_num_timesteps = True
         else:
             print("Starting fresh")
             model = SAC(

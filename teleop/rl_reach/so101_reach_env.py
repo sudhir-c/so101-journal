@@ -40,7 +40,7 @@ ROBOT_ID = "spectre"
 # Joints the policy controls (deltas). The rest are held fixed.
 ACTION_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex"]
 
-MAX_DELTA_DEG = 2.0          # per-step action bound (deg); safety core caps at 180 deg/s
+MAX_DELTA_DEG = 3.0          # per-step action bound (deg); safety core caps at 180 deg/s
 CONTROL_HZ = 10.0            # control-loop rate
 MAX_STEPS = 200              # episode step limit (truncation)
 
@@ -50,10 +50,27 @@ MAX_EE = np.array([0.3099, 0.1090, 0.2297])
 EE_MARGIN = 0.005            # shrink the allowed box this much (m) for safety
 
 # Reward weights.
-W_DIST = 1.0                 # per-metre distance penalty
+W_DIST = 1.0                 # per-metre distance penalty (dense; keeps ep_rew ≈ -avg_dist·steps)
 SUCCESS_THRESH = 0.03        # m — within this counts as reaching
-SUCCESS_BONUS = 1.0
+SUCCESS_BONUS = 10.0         # decisive terminal reward: dwarfs a single -dist step, so
+                             # crossing the threshold (and terminating) is clearly worth it
 W_ACTION = 0.01              # penalty on ‖action‖² to discourage thrashing
+W_PROGRESS = 15.0            # potential-based shaping weight. Shaping = Φ(dist)−Φ(prev),
+SHAPE_SCALE = 0.08           # with Φ = W_PROGRESS·(1−tanh(dist/SHAPE_SCALE)): a directional
+                             # gradient that STEEPENS near the goal (tanh), so closing the
+                             # final cm is worth disproportionately more — this is what
+                             # centres the policy inside SUCCESS_THRESH instead of parking
+                             # just outside. Potential-based ⇒ telescopes to a constant, so
+                             # it can't be farmed by camping near the goal.
+
+# Re-home: at the START of each episode, smoothly move the arm back to a
+# consistent central pose so it can't drift into a corner across the free-reset
+# episodes (which stalls learning). The pose is given in CARTESIAN xyz and solved
+# to joint angles ONCE at env init via the placo IK sidecar — the step-loop stays
+# IK-free. Set HOME_XYZ = None to disable re-homing.
+HOME_XYZ = ((MIN_EE + MAX_EE) / 2.0).copy()   # box centre (m); set to any in-box spot
+REHOME_TOL_DEG = 1.5         # "home reached" tolerance per joint
+REHOME_MAX_STEPS = 50        # cap the ramp (safety)
 
 
 def _clip(v, lo, hi):
@@ -63,7 +80,8 @@ def _clip(v, lo, hi):
 class SO101ReachEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, controller: RobotController | None = None, connect: bool = True):
+    def __init__(self, controller: RobotController | None = None, connect: bool = True,
+                 rehome: bool = True):
         super().__init__()
         self.controller = controller or RobotController(port=PORT, robot_id=ROBOT_ID)
         self._owns_controller = controller is None
@@ -76,7 +94,10 @@ class SO101ReachEnv(gym.Env):
 
         self._target = np.zeros(3)
         self._last_pos: dict[str, float] = {}
+        self._prev_dist = 0.0        # distance at the previous step (progress shaping)
         self._step_count = 0
+        # Solve the Cartesian home pose to joint targets once (IK sidecar).
+        self._home_arm = self._solve_home() if (rehome and HOME_XYZ is not None) else None
 
     # ── normalization ─────────────────────────────────────────────────────
     @staticmethod
@@ -107,8 +128,14 @@ class SO101ReachEnv(gym.Env):
     def _reset_task(self) -> None:
         self._target = self.np_random.uniform(MIN_EE, MAX_EE)
 
+    @staticmethod
+    def _phi(dist: float) -> float:
+        """Shaping potential: high near the goal, saturating far away."""
+        return W_PROGRESS * (1.0 - float(np.tanh(dist / SHAPE_SCALE)))
+
     def _compute_reward(self, obs, action, info) -> float:
         r = -W_DIST * info["distance"]
+        r += self._phi(info["distance"]) - self._phi(self._prev_dist)   # tanh progress shaping
         if info["is_success"]:
             r += SUCCESS_BONUS
         r -= W_ACTION * float(np.sum(np.square(action)))
@@ -136,14 +163,46 @@ class SO101ReachEnv(gym.Env):
             info["telemetry"] = {}
         return info
 
+    # ── re-home (episode reset to a consistent central pose) ──────────────
+    def _solve_home(self) -> dict[str, float]:
+        """Solve HOME_XYZ to arm-joint targets once, via the placo IK sidecar.
+        IK runs only here (init), never in the step loop."""
+        from teleop.robot.kinematics import ArmIKClient  # lazy: only needed if re-homing
+
+        q = self.controller.get_positions()
+        ik = ArmIKClient()
+        try:
+            sol, solvable, err = ik.solve(q, np.asarray(HOME_XYZ) * 1000.0, q["wrist_roll"])
+        finally:
+            ik.close()
+        if not solvable or sol is None:
+            raise RuntimeError(
+                f"HOME_XYZ {np.round(HOME_XYZ, 3)} is not reachable (IK err {err:.1f} mm) — "
+                "pick an in-box spot for HOME_XYZ"
+            )
+        return {j: float(sol[j]) for j in ACTION_JOINTS}
+
+    def _home(self) -> None:
+        """Smoothly rate-limit the arm to the home pose (velocity-limited by step())."""
+        for _ in range(REHOME_MAX_STEPS):
+            pos = self.controller.get_positions()
+            if all(abs(pos[j] - self._home_arm[j]) <= REHOME_TOL_DEG for j in ACTION_JOINTS):
+                break
+            self.controller.step(dict(self._home_arm))   # clamps + velocity-limits
+            time.sleep(1.0 / CONTROL_HZ)
+        self._last_pos = self.controller.get_positions()
+
     # ── gym API ───────────────────────────────────────────────────────────
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self._reset_task()                       # sample a new target; no physical reset
+        if self._home_arm is not None:
+            self._home()                         # re-center so the arm can't drift into a corner
+        self._reset_task()                       # sample a new target
         self._last_pos = self.controller.get_positions()
         self._step_count = 0
         obs = self._obs(self._last_pos)
         info = self._make_info(self._last_pos, rejected=False)
+        self._prev_dist = info["distance"]      # baseline for progress shaping
         return obs, info
 
     def step(self, action):
@@ -168,6 +227,7 @@ class SO101ReachEnv(gym.Env):
         info = self._make_info(self._last_pos, rejected)
         obs = self._obs(self._last_pos)
         reward = self._compute_reward(obs, action, info)
+        self._prev_dist = info["distance"]      # advance progress baseline
         terminated = self._is_terminated(info)
         truncated = self._step_count >= MAX_STEPS
         return obs, reward, terminated, truncated, info

@@ -81,20 +81,35 @@ def _load_chain(path: Path = URDF_PATH):
 _CHAIN = _load_chain()
 
 
-def fk(joint_deg) -> np.ndarray:
-    """Gripper tip position (metres, base frame) for the given joint angles.
+def fk_chain(joint_deg) -> list[list[float]]:
+    """Positions (metres, base frame) of every joint on the chain, base→tip.
+
+    Returns one xyz per joint (each joint's origin after its fixed <origin>
+    transform) plus the tip as the final point — i.e. the vertices of the arm
+    skeleton for the given joint angles. `fk()` is `fk_chain(...)[-1]`.
 
     `joint_deg` is a mapping {joint_name: degrees} (the chain joints are used;
     gripper is ignored) or a sequence in CHAIN_JOINTS order.
     """
     if not isinstance(joint_deg, dict):
         joint_deg = {n: float(joint_deg[i]) for i, n in enumerate(CHAIN_JOINTS)}
+    points = [[0.0, 0.0, 0.0]]        # base_link origin
     T = np.eye(4)
     for name, jtype, origin_T, axis in _CHAIN:
         T = T @ origin_T
+        points.append(T[:3, 3].tolist())   # this joint's location
         if jtype == "revolute":
             T = T @ _rot_axis(axis, np.deg2rad(joint_deg[name]))
-    return T[:3, 3].copy()
+    return points
+
+
+def fk(joint_deg) -> np.ndarray:
+    """Gripper tip position (metres, base frame) for the given joint angles.
+
+    `joint_deg` is a mapping {joint_name: degrees} (the chain joints are used;
+    gripper is ignored) or a sequence in CHAIN_JOINTS order.
+    """
+    return np.array(fk_chain(joint_deg)[-1])
 
 
 def _self_test() -> int:

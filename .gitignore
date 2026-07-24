@@ -11,6 +11,10 @@ __pycache__/
 # RL training checkpoints (SAC models + replay buffers) — large binaries.
 teleop/rl_reach/checkpoints/
 
+# Vendored three.js for the eval visualizer, fetched by
+# teleop/rl_reach/scripts/download_three.sh (don't commit).
+teleop/rl_reach/static/vendor/
+
 # MediaPipe Tasks model bundles: 22MB of binaries, reproducible via
 # teleop/scripts/download_models.sh. Fetch them, don't commit them.
 teleop/models/*.task

@@ -34,6 +34,15 @@ the same time.
    re-running resumes from the latest (`--fresh` to restart). Ctrl-C saves an
    interrupt checkpoint and releases the arm.
 4. Eval: `python -m teleop.rl_reach.eval_reach --model checkpoints/reach_sac_final`.
+   By default this opens a live **3D visualizer** at http://127.0.0.1:8091 (robot
+   camera feed + a three.js scene of the arm skeleton, the sampled target, and the
+   end-effector, with the error line/distance and a fading EE trail). One-time setup:
+   `./teleop/rl_reach/scripts/download_three.sh` (fetches vendored three.js r128 —
+   gitignored). Pick the arm-facing camera from the dropdown, or pass `--camera N`.
+   The visualizer is **display only** — eval stays the sole serial owner. Flags:
+   `--no-viz` (terminal-only, original behavior), `--viz-port`, `--no-browser`.
+   Reuses the shared `teleop.vision.camera_feed.CameraFeed` (also used by the robot
+   dashboard) via `teleop/rl_reach/viz_server.py`.
 
 ## Where the knobs live (top of `so101_reach_env.py`)
 - `ACTION_JOINTS` — the joints the policy moves (shoulder_pan, shoulder_lift,
@@ -42,8 +51,13 @@ the same time.
   180 deg/s regardless.
 - `CONTROL_HZ = 10`, `MAX_STEPS = 200`.
 - `MIN_EE` / `MAX_EE` / `EE_MARGIN` — measured workspace box; a step whose predicted
-  tip would go further outside the box is rejected (arm holds). Note the arm must be
-  inside this box to move freely — the all-zeros pose is outside it.
+  tip would go further outside the box is rejected (arm holds).
+- `HOME_XYZ` — Cartesian pose (m) the arm re-homes to at the START of each episode,
+  solved to joint angles ONCE via the placo IK sidecar (the step-loop stays IK-free).
+  Defaults to the box centre. This prevents the arm drifting into a corner across the
+  free-reset episodes (which otherwise stalls learning). Set `HOME_XYZ = None` to
+  disable re-homing. Because it re-homes, the arm no longer needs to be positioned
+  inside the box by hand before training.
 - Reward: `W_DIST`, `SUCCESS_THRESH`, `SUCCESS_BONUS`, `W_ACTION`.
 - Hardware: `PORT`, `ROBOT_ID`.
 

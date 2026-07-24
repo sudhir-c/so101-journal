@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SO-101 reach visualizer</title>
+  <style>
+    :root { --bg:#0e1116; --panel:#161b22; --edge:#2b333d; --fg:#e6edf3; --muted:#8b949e;
+            --amber:#ffb020; --green:#22cc66; --red:#ff4d4d; }
+    * { box-sizing: border-box; }
+    html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+                 font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    #app { display:flex; flex-direction:column; height:100vh; }
+    header { display:flex; align-items:center; gap:22px; padding:10px 16px;
+             background:var(--panel); border-bottom:1px solid var(--edge); flex:0 0 auto; }
+    header h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.2px; }
+    .stat { display:flex; flex-direction:column; }
+    .stat .k { font-size:10px; text-transform:uppercase; color:var(--muted); letter-spacing:.5px; }
+    .stat .v { font-size:18px; font-variant-numeric:tabular-nums; font-weight:600; }
+    #status { margin-left:auto; font-size:12px; color:var(--muted); }
+    #status.ok { color:var(--green); }
+    main { display:flex; flex:1 1 auto; min-height:0; }
+    .pane { position:relative; flex:1 1 50%; min-width:0; }
+    #cam { background:#000; display:flex; align-items:center; justify-content:center; border-right:1px solid var(--edge); }
+    #feed { max-width:100%; max-height:100%; object-fit:contain; }
+    #cambar { position:absolute; left:12px; bottom:12px; display:flex; gap:8px; align-items:center;
+              background:rgba(0,0,0,.55); padding:6px 8px; border-radius:8px; }
+    #cambar label { font-size:11px; color:var(--muted); }
+    select { background:#0d1117; color:var(--fg); border:1px solid var(--edge); border-radius:6px; padding:3px 6px; }
+    #scene { background:radial-gradient(circle at 50% 30%, #1a2029, #0b0e13); }
+    #c { width:100%; height:100%; display:block; }
+    #legend { position:absolute; right:12px; top:12px; background:rgba(0,0,0,.5); padding:8px 10px;
+              border-radius:8px; font-size:11px; color:var(--muted); }
+    #legend .row { display:flex; align-items:center; gap:6px; margin:2px 0; }
+    #legend .dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>SO-101 reach</h1>
+      <div class="stat"><span class="k">Episode</span><span class="v" id="s-ep">–</span></div>
+      <div class="stat"><span class="k">Step</span><span class="v" id="s-step">–</span></div>
+      <div class="stat"><span class="k">Distance</span><span class="v" id="s-dist">– mm</span></div>
+      <div class="stat"><span class="k">Success</span><span class="v" id="s-succ">0 / 0</span></div>
+      <div id="status">connecting…</div>
+    </header>
+    <main>
+      <div class="pane" id="cam">
+        <img id="feed" src="/video" alt="camera feed">
+        <div id="cambar">
+          <label for="camsel">Camera</label>
+          <select id="camsel"><option value="-1">off</option></select>
+        </div>
+      </div>
+      <div class="pane" id="scene">
+        <canvas id="c"></canvas>
+        <div id="legend">
+          <div class="row"><span class="dot" style="background:var(--amber)"></span>target</div>
+          <div class="row"><span class="dot" style="background:var(--red)"></span>end-effector</div>
+          <div class="row"><span class="dot" style="background:#4ea1ff"></span>arm skeleton</div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/vendor/three.min.js"></script>
+  <script src="/static/vendor/OrbitControls.js"></script>
+  <script>
+  (function () {
+    "use strict";
+    const AMBER = 0xffb020, GREEN = 0x22cc66, RED = 0xff4d4d, STEEL = 0x4ea1ff;
+    const TRAIL_MAX = 600, LERP = 0.35;
+
+    // ── three.js setup ────────────────────────────────────────────────────
+    const canvas = document.getElementById("c");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.005, 100);
+    camera.up.set(0, 0, 1);                         // base frame is z-up
+    const controls = new THREE.OrbitControls(camera, canvas);
+    controls.enableDamping = true;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+    const dl = new THREE.DirectionalLight(0xffffff, 0.6); dl.position.set(0.4, -0.6, 1); scene.add(dl);
+
+    const axes = new THREE.AxesHelper(0.08); scene.add(axes);
+    const grid = new THREE.GridHelper(0.6, 12, 0x30363d, 0x21262d);
+    grid.rotation.x = Math.PI / 2;                  // lie in the XY plane (z-up)
+    scene.add(grid);
+
+    // Arm skeleton: a polyline + a sphere at each joint.
+    const skelGeom = new THREE.BufferGeometry();
+    skelGeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(7 * 3), 3));
+    const skel = new THREE.Line(skelGeom, new THREE.LineBasicMaterial({ color: STEEL }));
+    scene.add(skel);
+    const jointMat = new THREE.MeshStandardMaterial({ color: STEEL, roughness: 0.5 });
+    let jointDots = [];
+
+    // Markers.
+    const ee = new THREE.Mesh(new THREE.SphereGeometry(0.010, 24, 24),
+                              new THREE.MeshStandardMaterial({ color: RED, roughness: 0.4 }));
+    scene.add(ee);
+    const targetMat = new THREE.MeshStandardMaterial({ color: AMBER, roughness: 0.4 });
+    const target = new THREE.Mesh(new THREE.SphereGeometry(0.010, 24, 24), targetMat);
+    scene.add(target);
+    let threshMesh = null;                          // success-threshold wireframe sphere
+
+    // Error line EE → target.
+    const errGeom = new THREE.BufferGeometry();
+    errGeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(2 * 3), 3));
+    scene.add(new THREE.Line(errGeom, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 })));
+
+    // EE trail (ring buffer).
+    const trailGeom = new THREE.BufferGeometry();
+    trailGeom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 3), 3));
+    trailGeom.setDrawRange(0, 0);
+    scene.add(new THREE.Line(trailGeom, new THREE.LineBasicMaterial({ color: 0xff8a3d, transparent: true, opacity: 0.7 })));
+    let trailN = 0;
+
+    let box = null;                                  // workspace wireframe
+    const eePos = new THREE.Vector3(), tgtPos = new THREE.Vector3();
+    let haveEE = false, lastTargetKey = "";
+
+    // ── config → build box, threshold sphere, frame the camera ────────────
+    fetch("/config").then(r => r.json()).then(cfg => {
+      const lo = cfg.min_ee, hi = cfg.max_ee;
+      const size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+      const mid = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+      const bg = new THREE.BoxGeometry(size[0], size[1], size[2]);
+      box = new THREE.LineSegments(new THREE.EdgesGeometry(bg),
+              new THREE.LineBasicMaterial({ color: 0x8b949e, transparent: true, opacity: 0.5 }));
+      box.position.set(mid[0], mid[1], mid[2]);
+      scene.add(box);
+
+      threshMesh = new THREE.Mesh(new THREE.SphereGeometry(cfg.success_thresh, 20, 20),
+              new THREE.MeshBasicMaterial({ color: GREEN, wireframe: true, transparent: true, opacity: 0.35 }));
+      scene.add(threshMesh);
+
+      controls.target.set(mid[0], mid[1], mid[2]);
+      const reach = Math.max(...size) * 2.4 + 0.15;
+      camera.position.set(mid[0] + reach, mid[1] - reach, mid[2] + reach * 0.7);
+      controls.update();
+    });
+
+    // ── camera picker ─────────────────────────────────────────────────────
+    const camsel = document.getElementById("camsel");
+    fetch("/api/cameras").then(r => r.json()).then(d => {
+      d.indices.forEach(i => {
+        const o = document.createElement("option");
+        o.value = i; o.textContent = (d.names && d.names[i]) ? `${i}: ${d.names[i]}` : `camera ${i}`;
+        if (i === d.current) o.selected = true;
+        camsel.appendChild(o);
+      });
+    });
+    camsel.addEventListener("change", () => {
+      fetch("/api/camera", { method: "POST", headers: { "Content-Type": "application/json" },
+                             body: JSON.stringify({ index: parseInt(camsel.value, 10) }) });
+      document.getElementById("feed").src = "/video?t=" + Date.now();   // nudge the stream
+    });
+
+    // ── state polling ─────────────────────────────────────────────────────
+    let latest = null;
+    const statusEl = document.getElementById("status");
+    async function poll() {
+      try {
+        const s = await (await fetch("/state")).json();
+        if (s && s.ee) { latest = s; statusEl.textContent = "live"; statusEl.className = "ok"; }
+      } catch (e) { statusEl.textContent = "waiting…"; statusEl.className = ""; }
+    }
+    setInterval(poll, 50);
+
+    function setLine(geom, a, b) {
+      const p = geom.attributes.position.array;
+      p[0] = a.x; p[1] = a.y; p[2] = a.z; p[3] = b.x; p[4] = b.y; p[5] = b.z;
+      geom.attributes.position.needsUpdate = true;
+    }
+
+    function applyState(s) {
+      // Skeleton (snap — joints move fast and are cheap).
+      const pts = s.skeleton, sp = skelGeom.attributes.position.array;
+      for (let i = 0; i < pts.length && i < 7; i++) { sp[i*3]=pts[i][0]; sp[i*3+1]=pts[i][1]; sp[i*3+2]=pts[i][2]; }
+      skelGeom.attributes.position.needsUpdate = true;
+      skelGeom.setDrawRange(0, Math.min(pts.length, 7));
+      if (jointDots.length !== pts.length) {
+        jointDots.forEach(d => scene.remove(d)); jointDots = [];
+        for (let i = 0; i < pts.length; i++) {
+          const d = new THREE.Mesh(new THREE.SphereGeometry(0.006, 12, 12), jointMat); scene.add(d); jointDots.push(d);
+        }
+      }
+      jointDots.forEach((d, i) => d.position.set(pts[i][0], pts[i][1], pts[i][2]));
+
+      tgtPos.set(s.target[0], s.target[1], s.target[2]);
+      // New target → reset trail + colour.
+      const key = s.target.map(v => v.toFixed(4)).join(",");
+      if (key !== lastTargetKey) { lastTargetKey = key; trailN = 0; trailGeom.setDrawRange(0, 0); }
+      targetMat.color.setHex(s.is_success ? GREEN : AMBER);
+      target.position.copy(tgtPos);
+      if (threshMesh) threshMesh.position.copy(tgtPos);
+
+      // Stats.
+      document.getElementById("s-ep").textContent = s.episode;
+      document.getElementById("s-step").textContent = s.step;
+      document.getElementById("s-dist").textContent = (s.distance * 1000).toFixed(0) + " mm";
+      document.getElementById("s-succ").textContent = `${s.successes} / ${s.total}`;
+    }
+
+    function pushTrail(v) {
+      const arr = trailGeom.attributes.position.array;
+      if (trailN < TRAIL_MAX) {
+        arr[trailN*3]=v.x; arr[trailN*3+1]=v.y; arr[trailN*3+2]=v.z; trailN++;
+        trailGeom.setDrawRange(0, trailN);
+      } else {
+        arr.copyWithin(0, 3); arr[(TRAIL_MAX-1)*3]=v.x; arr[(TRAIL_MAX-1)*3+1]=v.y; arr[(TRAIL_MAX-1)*3+2]=v.z;
+      }
+      trailGeom.attributes.position.needsUpdate = true;
+    }
+
+    // ── render loop ───────────────────────────────────────────────────────
+    let lastTrail = new THREE.Vector3();
+    function resize() {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      if (canvas.width !== w || canvas.height !== h) {
+        renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+      }
+    }
+    function frame() {
+      resize();
+      if (latest) {
+        applyState(latest);
+        const desired = new THREE.Vector3(latest.ee[0], latest.ee[1], latest.ee[2]);
+        if (!haveEE) { eePos.copy(desired); haveEE = true; } else { eePos.lerp(desired, LERP); }
+        ee.position.copy(eePos);
+        setLine(errGeom, eePos, tgtPos);
+        if (!latest.is_success && eePos.distanceTo(lastTrail) > 0.002) { pushTrail(eePos.clone()); lastTrail.copy(eePos); }
+      }
+      controls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>
